@@ -5,7 +5,7 @@
 Backend архитектура:
 FastAPI - высокопроизводительный web-фреймворк
 
-Qwen 2.5 (0.5B/1.5B) - open-source LLM для генерации контента
+Qwen 3 (32B) - open-source LLM для генерации контента
 
 Sentence Transformers - эмбеддинги для семантического поиска
 
