@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 class TemplateAnalysis(BaseModel):
     slides_count: int
     layouts: List[Dict]
-    master_slides: List[str]
 
 
 def analyze_template(template_path: str) -> TemplateAnalysis:
@@ -38,13 +37,9 @@ def analyze_template(template_path: str) -> TemplateAnalysis:
 
             layouts.append(layout_info)
 
-        # Получаем мастер-слайды
-        master_slides = [master.name for master in prs.slide_masters if master.name]
-
         return TemplateAnalysis(
             slides_count=len(prs.slides),
-            layouts=layouts,
-            master_slides=master_slides
+            layouts=layouts
         )
 
     except Exception as e:
