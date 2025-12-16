@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import logging
 from app.api import upload, generate, presentation_templates
-from app.core.embeddings import document_index
+from app.core.embeddings import document_index, model
 from app.core.llm_generator import content_generator
 
 logging.basicConfig(level=logging.INFO)
@@ -27,10 +27,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
 # Подключаем только upload и generate
-app.include_router(upload.router, prefix="/upload", tags=["upload"])
-app.include_router(generate.router, prefix="/generate", tags=["generate"])
-app.include_router(presentation_templates.router, prefix="/upload", tags=["presentation_templates"])
+app.include_router(upload.router, prefix="/document", tags=["document"])
+app.include_router(generate.router, prefix="/presentation", tags=["presentation"])
+app.include_router(presentation_templates.router, prefix="/templates", tags=["presentation_templates"])
 
 
 @app.get("/")
@@ -61,6 +62,8 @@ def health_check():
         documents_loaded = False
         documents_count = 0
         index_built = False
+
+    logger.info(f"Model device: {model.device}")
 
     return {
         "status": "healthy" if model_health["status"] in ["healthy", "loaded"] else "degraded",
