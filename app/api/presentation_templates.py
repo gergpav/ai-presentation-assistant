@@ -1,10 +1,8 @@
 import shutil
 import uuid
 import logging
-from typing import List
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pathlib import Path
-from pydantic import BaseModel
 from app.core.presentation_analyzer import analyze_template
 
 router = APIRouter()
@@ -15,14 +13,6 @@ TEMPLATES_DIR = Path("templates")
 TEMPLATES_DIR.mkdir(exist_ok=True)
 
 
-class TemplateInfo(BaseModel):
-    id: str
-    name: str
-    filename: str
-    slides_count: int
-    layouts: List[str]
-
-
 # Хранилище шаблонов в памяти
 templates_store = {}
 
@@ -30,7 +20,7 @@ templates_store = {}
 @router.post("/upload")
 async def upload_template(file: UploadFile = File(...), template_name: str = "Пользовательский шаблон"):
     """Загрузка PowerPoint шаблона"""
-    if not file.filename.endswith('.pptx'):
+    if not file.filename.lower().endswith('.pptx'):
         raise HTTPException(status_code=400, detail="Только .pptx файлы поддерживаются")
 
     try:
@@ -73,7 +63,7 @@ async def list_templates():
     return list(templates_store.values())
 
 
-@router.delete("/{template_id}")
+@router.delete("/delete/{template_id}")
 async def delete_template(template_id: str):
     """Удаление шаблона"""
     if template_id not in templates_store:
