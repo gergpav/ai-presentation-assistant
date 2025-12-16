@@ -1,77 +1,95 @@
+# app/core/pptx_builder.py
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import PP_PLACEHOLDER
 import io
 import logging
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class PresentationBuilder:
-    def __init__(self, template_path: str = None):
+    def __init__(self, template_path: Optional[str] = None):
         if template_path:
             self.prs = Presentation(template_path)
-            self._clear_slides()
+            self.clear_slides()
         else:
             self.prs = Presentation()
-            self.prs.slide_width = Inches(13.333)
-            self.prs.slide_height = Inches(7.5)
 
-    def _clear_slides(self):
-        """Очищает все слайды из шаблона - ПРОСТОЙ ВАРИАНТ"""
+    def clear_slides(self):
+        """Очищает все слайды из шаблона, но сохраняет дизайн/layout'ы"""
         try:
-            # Просто удаляем все существующие слайды
-            slide_ids = [slide.slide_id for slide in self.prs.slides]
-            for slide_id in slide_ids:
-                self.prs.slides._sldIdLst.remove(slide_id)
+            sldIdLst = self.prs.slides._sldIdLst
+            for sldId in list(sldIdLst):
+                sldIdLst.remove(sldId)
             logger.info("✅ Шаблон очищен")
         except Exception as e:
             logger.warning(f"Не удалось очистить шаблон: {e}")
-            # Создаем новую презентацию если не получилось очистить
             self.prs = Presentation()
 
-    def add_slide(self, slide_type: str, title: str, content: str):
+    def add_slide(self, slide_type: str, title: str, content: str, images: Optional[List[str]] = None):
+        images = images or []
         layout_idx = 0 if slide_type == "title" else 1
 
         try:
             slide = self.prs.slides.add_slide(self.prs.slide_layouts[layout_idx])
-        except:
+        except Exception:
             slide = self.prs.slides.add_slide(self.prs.slide_layouts[0])
 
         # Заголовок
         if slide.shapes.title:
             slide.shapes.title.text = title
 
-        # Контент с улучшенным форматированием
+        # Контент — пытаемся найти BODY плейсхолдер
+        body_shape = None
         try:
-            if len(slide.placeholders) > 1:
-                placeholder = slide.placeholders[1]
-                text_frame = placeholder.text_frame
-                text_frame.text = content
+            for ph in slide.placeholders:
+                if ph.placeholder_format.type == PP_PLACEHOLDER.BODY:
+                    body_shape = ph
+                    break
+        except Exception:
+            body_shape = None
 
-                # Форматируем текст
-                for paragraph in text_frame.paragraphs:
-                    paragraph.font.size = Pt(18)
-                    paragraph.alignment = PP_ALIGN.LEFT
+        if body_shape is not None:
+            tf = body_shape.text_frame
+            tf.clear()
+            p0 = tf.paragraphs[0]
+            p0.text = content
+            p0.font.size = Pt(18)
+            p0.alignment = PP_ALIGN.LEFT
+        else:
+            # Фоллбек: текстбокс
+            left = Inches(1)
+            top = Inches(2)
+            width = Inches(11)
+            height = Inches(4)
 
-            else:
-                # Создаем текстовое поле с правильными размерами
-                left = Inches(1)
-                top = Inches(2)
-                width = Inches(11)
-                height = Inches(4)
+            textbox = slide.shapes.add_textbox(left, top, width, height)
+            tf = textbox.text_frame
+            tf.text = content
+            for p in tf.paragraphs:
+                p.font.size = Pt(18)
+                p.alignment = PP_ALIGN.LEFT
 
-                textbox = slide.shapes.add_textbox(left, top, width, height)
-                text_frame = textbox.text_frame
-                text_frame.text = content
+        # Картинки (до 4, сетка 2x2)
+        if images:
+            left0 = Inches(1)
+            top0 = Inches(6.0)
+            cell_w = Inches(5.5)
+            cell_h = Inches(1.6)
+            max_imgs = min(4, len(images))
 
-                # Форматируем текст
-                for paragraph in text_frame.paragraphs:
-                    paragraph.font.size = Pt(18)
-                    paragraph.alignment = PP_ALIGN.LEFT
-
-        except Exception as e:
-            logger.warning(f"Не удалось добавить контент: {e}")
+            for i in range(max_imgs):
+                path = images[i]
+                row, col = divmod(i, 2)
+                left = left0 + col * (cell_w + Inches(0.3))
+                top = top0 + row * (cell_h + Inches(0.3))
+                try:
+                    slide.shapes.add_picture(path, left, top, width=cell_w, height=cell_h)
+                except Exception as e:
+                    logger.warning(f"Не удалось добавить изображение '{path}': {e}")
 
         return slide
 
@@ -83,3 +101,5 @@ class PresentationBuilder:
 
     def get_slide_count(self) -> int:
         return len(self.prs.slides)
+
+
