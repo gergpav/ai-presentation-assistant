@@ -1,3 +1,5 @@
+from pathlib import Path
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi import UploadFile
 import io
 import pandas as pd
@@ -133,4 +135,17 @@ async def extract_text_from_file(file: UploadFile) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Ошибка обработки файла {file.filename}: {e}")
         raise ValueError(f"Ошибка обработки файла: {str(e)}")
+
+
+async def extract_text_from_path(path: str) -> Dict[str, Any]:
+    """
+    Мостик для воркера: читаем файл с диска и прогоняем через существующий extract_text_from_file.
+    """
+    p = Path(path)
+    content = p.read_bytes()
+
+    # UploadFile ожидает file-like объект
+    file_like = io.BytesIO(content)
+    uf = StarletteUploadFile(filename=p.name, file=file_like)
+    return await extract_text_from_file(uf)
 
