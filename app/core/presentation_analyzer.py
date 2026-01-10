@@ -1,3 +1,5 @@
+from io import BytesIO
+
 from pptx import Presentation
 from typing import List, Dict
 from pydantic import BaseModel
@@ -11,37 +13,30 @@ class TemplateAnalysis(BaseModel):
     layouts: List[Dict]
 
 
-def analyze_template(template_path: str) -> TemplateAnalysis:
+def analyze_template(template_bytes: str) -> TemplateAnalysis:
     """Анализирует PowerPoint шаблон и возвращает информацию о макетах"""
     try:
-        prs = Presentation(template_path)
-
+        prs = Presentation(BytesIO(template_bytes))
         layouts = []
 
-        # Анализируем доступные макеты
         for i, layout in enumerate(prs.slide_layouts):
-            layout_info = {
+            layouts.append({
                 "index": i,
                 "name": layout.name,
-                "placeholders": []
-            }
-
-            # Анализируем плейсхолдеры в макете
-            for placeholder in layout.placeholders:
-                if placeholder.has_text_frame:
-                    layout_info["placeholders"].append({
+                "placeholders": [
+                    {
                         "type": "text",
-                        "index": placeholder.placeholder_format.idx,
-                        "name": f"Placeholder {placeholder.placeholder_format.idx}"
-                    })
-
-            layouts.append(layout_info)
+                        "index": ph.placeholder_format.idx
+                    }
+                    for ph in layout.placeholders
+                    if ph.has_text_frame
+                ]
+            })
 
         return TemplateAnalysis(
             slides_count=len(prs.slides),
             layouts=layouts
         )
-
     except Exception as e:
         logger.error(f"Ошибка анализа шаблона: {e}")
         raise
