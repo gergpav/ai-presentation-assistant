@@ -1,93 +1,56 @@
-import time
-from typing import Optional, List
+# app/api/generate.py
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-import io
-import logging
+from app.db.session import get_db
+from app.db.models.user import User
+from app.db.models.slide import Slide
+from app.db.models.project import Project
+from app.db.models.job import Job
+from app.db.models.enums import JobType, JobStatus, SlideStatus
+from app.services.auth_service import get_current_user
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
-from app.core.llm_generator import content_generator
-from app.api.presentation_templates import templates_store
-from app.core.pptx_builder import PresentationBuilder
-
-from app.utils.helpers import ExportRequest, SlideExport, generate_one_slide
-from app.core.pdf_builder import slides_to_pdf_bytes
-
-
-logger = logging.getLogger(__name__)
-
-router = APIRouter()
+router = APIRouter(tags=["generate"])
 
 
-@router.post("/export")
-async def export_presentation(request: ExportRequest):
-    """
-    Экспорт:
-    - генерим content для каждого слайда по prompt (+контекст)
-    - собираем PPTX или PDF
-    """
-    if not request.slides:
-        raise HTTPException(status_code=400, detail="Нет слайдов для экспорта")
+class CreateJobResponse(BaseModel):
+    job_id: int
 
-    if not content_generator.is_loaded:
-        raise HTTPException(status_code=503, detail="LLM-модель не загружена")
 
-    t0 = time.time()
-    logger.info(
-        f"🚀 Export start: slides={len(request.slides)}, format={request.format}, audience={request.audience}"
+@router.post("/slides/{slide_id}/generate", response_model=CreateJobResponse, status_code=202)
+async def generate_slide(
+    slide_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # слайд должен принадлежать пользователю
+    res = await db.execute(
+        select(Slide)
+        .join(Project, Project.id == Slide.project_id)
+        .where(Slide.id == slide_id, Project.user_id == user.id)
     )
+    slide = res.scalar_one_or_none()
+    if not slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
 
-    # 1) Генерация всех слайдов
-    generated: List[SlideExport] = []
-    for i, slide in enumerate(request.slides):
-        generated.append(await generate_one_slide(slide, request.audience))
-        logger.info(f"    🟢 Slide {i+1}/{len(request.slides)} generated")
+    if not slide.prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
 
-    t1 = time.time()
-    logger.info(f"✅ Slides generated in {t1 - t0:.2f}s")
+    slide.status = SlideStatus.generating
 
-    # 2) PPTX
-    if request.format == "pptx":
-        template_path: Optional[str] = None
-        if request.template_id:
-            tmpl = templates_store.get(request.template_id)
-            if not tmpl:
-                raise HTTPException(status_code=404, detail="Шаблон не найден")
-            template_path = tmpl["file_path"]
+    job = Job(
+        user_id=user.id,
+        project_id=slide.project_id,
+        slide_id=slide.id,
+        type=JobType.generate_slide,
+        status=JobStatus.queued,
+        progress=0,
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
 
-        builder = PresentationBuilder(template_path=template_path)
+    return CreateJobResponse(job_id=job.id)
 
-        for s in generated:
-            builder.add_slide(
-                slide_type="content",
-                title=s.title,
-                content=s.content,
-                images=s.images,
-            )
-
-        pptx_io = builder.save_to_bytes()
-        logger.info(f"📊 PPTX built in {time.time() - t1:.2f}s (total {time.time() - t0:.2f}s)")
-
-        return StreamingResponse(
-            pptx_io,
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            headers={"Content-Disposition": 'attachment; filename="presentation.pptx"'},
-        )
-
-    # 3) PDF
-    if request.format == "pdf":
-        try:
-            pdf_bytes = slides_to_pdf_bytes(generated, request.audience)
-        except Exception as e:
-            logger.error(f"Ошибка генерации PDF: {e}")
-            raise HTTPException(status_code=500, detail="Ошибка при генерации PDF")
-
-        logger.info(f"📄 PDF built in {time.time() - t1:.2f}s (total {time.time() - t0:.2f}s)")
-
-        return StreamingResponse(
-            io.BytesIO(pdf_bytes),
-            media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="presentation.pdf"'},
-        )
-
-    raise HTTPException(status_code=400, detail="Неподдерживаемый формат экспорта")

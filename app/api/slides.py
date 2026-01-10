@@ -1,0 +1,307 @@
+# app/api/slides.py
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, func, delete, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import SlideContent
+from app.db.session import get_db
+from app.db.models.user import User
+from app.db.models.project import Project
+from app.db.models.slide import Slide
+from app.db.models.enums import SlideVisualType, SlideStatus
+from app.services.auth_service import get_current_user
+
+router = APIRouter(tags=["slides"])
+
+
+class SlideCreate(BaseModel):
+    title: str = Field(default="Слайд", min_length=1, max_length=255)
+    visual_type: SlideVisualType
+    prompt: str | None = None
+
+
+class SlideUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    visual_type: SlideVisualType | None = None
+    prompt: str | None = None
+    position: int | None = None
+
+    @field_validator("position")
+    @classmethod
+    def validate_position(cls, v):
+        if v is not None and v < 1:
+            raise ValueError("position must be >= 1")
+        return v
+
+
+class SlideOut(BaseModel):
+    id: int
+    project_id: int
+    position: int
+    title: str
+    visual_type: SlideVisualType
+    prompt: str | None
+    status: SlideStatus
+
+
+class SlideContentUpdate(BaseModel):
+    content: str = Field(min_length=1)
+
+
+async def _ensure_project_owner(db: AsyncSession, project_id: int, user_id: int) -> Project:
+    res = await db.execute(select(Project).where(Project.id == project_id, Project.user_id == user_id))
+    project = res.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+async def _ensure_slide_owner(db: AsyncSession, slide_id: int, user_id: int) -> Slide:
+    res = await db.execute(
+        select(Slide)
+        .join(Project, Project.id == Slide.project_id)
+        .where(Slide.id == slide_id, Project.user_id == user_id)
+    )
+    slide = res.scalar_one_or_none()
+    if not slide:
+        raise HTTPException(status_code=404, detail="Slide not found")
+    return slide
+
+
+@router.get("/projects/{project_id}/slides", response_model=list[SlideOut])
+async def list_slides(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _ensure_project_owner(db, project_id, user.id)
+    res = await db.execute(select(Slide).where(Slide.project_id == project_id).order_by(Slide.position.asc()))
+    slides = res.scalars().all()
+    return [
+        SlideOut(
+            id=s.id,
+            project_id=s.project_id,
+            position=s.position,
+            title=s.title,
+            visual_type=s.visual_type,
+            prompt=s.prompt,
+            status=s.status,
+        )
+        for s in slides
+    ]
+
+
+@router.post("/projects/{project_id}/slides", response_model=SlideOut, status_code=201)
+async def create_slide(
+    project_id: int,
+    payload: SlideCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _ensure_project_owner(db, project_id, user.id)
+
+    # position = max(position)+1
+    res = await db.execute(select(func.coalesce(func.max(Slide.position), 0)).where(Slide.project_id == project_id))
+    next_pos = int(res.scalar_one()) + 1
+
+    slide = Slide(
+        project_id=project_id,
+        position=next_pos,
+        title=payload.title,
+        visual_type=payload.visual_type,
+        prompt=payload.prompt,
+        status=SlideStatus.draft,
+    )
+    db.add(slide)
+    await db.commit()
+    await db.refresh(slide)
+
+    return SlideOut(
+        id=slide.id,
+        project_id=slide.project_id,
+        position=slide.position,
+        title=slide.title,
+        visual_type=slide.visual_type,
+        prompt=slide.prompt,
+        status=slide.status,
+    )
+
+
+@router.get("/slides/{slide_id}/content/latest")
+async def get_latest_slide_content(
+    slide_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # проверяем, что слайд принадлежит пользователю
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+
+    q = (
+        select(SlideContent)
+        .where(SlideContent.slide_id == slide.id)
+        .order_by(desc(SlideContent.id))
+        .limit(1)
+    )
+    res = await db.execute(q)
+    sc = res.scalar_one_or_none()
+    if not sc:
+        return {"slide_id": slide.id, "content": None}
+
+    # Универсально достанем текст, как и в воркере
+    if hasattr(sc, "content_text"):
+        text = sc.content_text
+    elif hasattr(sc, "content"):
+        text = sc.content
+    elif hasattr(sc, "text"):
+        text = sc.text
+    else:
+        text = None
+
+    return {
+        "slide_id": slide.id,
+        "version": getattr(sc, "version", None),
+        "content": text,
+        "created_at": getattr(sc, "created_at", None),
+    }
+
+
+@router.put("/slides/{slide_id}/content/latest")
+async def save_edited_slide_content(
+    slide_id: int,
+    payload: SlideContentUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Сохраняет вручную отредактированный контент как НОВУЮ запись SlideContent.
+    Это нужно для UI: пользователь редактирует текст во вкладке "Контент" и изменения должны сохраняться.
+    """
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+
+    sc = SlideContent(slide_id=slide.id)
+
+    # Универсально положим текст (у тебя поле может называться content_text / content / text)
+    if hasattr(sc, "content_text"):
+        sc.content_text = payload.content
+    elif hasattr(sc, "content"):
+        sc.content = payload.content
+    elif hasattr(sc, "text"):
+        sc.text = payload.content
+    else:
+        raise HTTPException(status_code=500, detail="SlideContent text column not found")
+
+    # Если есть version — увеличим
+    if hasattr(sc, "version"):
+        res = await db.execute(
+            select(SlideContent)
+            .where(SlideContent.slide_id == slide.id)
+            .order_by(desc(SlideContent.version))
+            .limit(1)
+        )
+        last = res.scalar_one_or_none()
+        sc.version = (last.version + 1) if last else 1
+
+    db.add(sc)
+    await db.commit()
+    await db.refresh(sc)
+
+    # Вернём тот же формат, что и /content/latest
+    if hasattr(sc, "content_text"):
+        text = sc.content_text
+    elif hasattr(sc, "content"):
+        text = sc.content
+    elif hasattr(sc, "text"):
+        text = sc.text
+    else:
+        text = None
+
+    return {
+        "slide_id": slide.id,
+        "version": getattr(sc, "version", None),
+        "content": text,
+        "created_at": getattr(sc, "created_at", None),
+    }
+
+
+@router.get("/slides/{slide_id}/content")
+async def list_slide_content_versions(
+    slide_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+
+    res = await db.execute(
+        select(SlideContent)
+        .where(SlideContent.slide_id == slide.id)
+        .order_by(SlideContent.id.desc())
+        .limit(20)
+    )
+    items = res.scalars().all()
+
+    out = []
+    for sc in items:
+        if hasattr(sc, "content_text"):
+            text = sc.content_text
+        elif hasattr(sc, "content"):
+            text = sc.content
+        elif hasattr(sc, "text"):
+            text = sc.text
+        else:
+            text = None
+
+        out.append({
+            "id": sc.id,
+            "version": getattr(sc, "version", None),
+            "content": text,
+            "created_at": getattr(sc, "created_at", None),
+        })
+
+    return {"slide_id": slide.id, "items": out}
+
+
+@router.patch("/slides/{slide_id}", response_model=SlideOut)
+async def update_slide(
+    slide_id: int,
+    payload: SlideUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+
+    # простое обновление полей (перестановку позиций сделаем отдельным endpoint'ом позже)
+    if payload.title is not None:
+        slide.title = payload.title
+    if payload.visual_type is not None:
+        slide.visual_type = payload.visual_type
+    if payload.prompt is not None:
+        slide.prompt = payload.prompt
+    if payload.position is not None:
+        slide.position = payload.position  # ⚠️ временно, ниже сделаем правильный reorder
+
+    await db.commit()
+    await db.refresh(slide)
+
+    return SlideOut(
+        id=slide.id,
+        project_id=slide.project_id,
+        position=slide.position,
+        title=slide.title,
+        visual_type=slide.visual_type,
+        prompt=slide.prompt,
+        status=slide.status,
+    )
+
+
+@router.delete("/slides/{slide_id}", status_code=204)
+async def delete_slide(
+    slide_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+    await db.execute(delete(Slide).where(Slide.id == slide.id))
+    await db.commit()
+    return None
+
