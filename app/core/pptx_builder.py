@@ -14,6 +14,17 @@ class PresentationBuilder:
     def __init__(self, template_path: Optional[str] = None):
         if template_path:
             self.prs = Presentation(template_path)
+            self.layout_map = {}
+            for i, layout in enumerate(self.prs.slide_layouts):
+                name = layout.name.lower()
+                if 'title and content' in name:
+                    self.layout_map['title_and_content'] = i
+                elif 'two content' in name:
+                    self.layout_map['two_content'] = i
+                elif 'title only' in name:
+                    self.layout_map['title_only'] = i
+                elif 'title slide' in name:
+                    self.layout_map['title'] = i
             self.clear_slides()
         else:
             self.prs = Presentation()
@@ -29,9 +40,32 @@ class PresentationBuilder:
             logger.warning(f"Не удалось очистить шаблон: {e}")
             self.prs = Presentation()
 
-    def add_slide(self, slide_type: str, title: str, content: str, images: Optional[List[str]] = None):
+    def add_slide(self, slide_type: str, title: str, content: str,
+                  images: Optional[List[str]] = None):
+        """
+        Add a new slide to the presentation, choosing a layout dynamically based on
+        slide_type, the presence of images, and whether there is any content text.
+
+        Parameters:
+        - slide_type: "title" or "content". Title slides always use the title layout.
+        - images: A list of image paths. The number of images determines if a "two content" or "title only" layout is chosen.
+        - content: The text for the slide. If content is empty but an image is present, a "title only" layout is chosen.
+        """
         images = images or []
-        layout_idx = 0 if slide_type == "title" else 1
+        # Determine layout index dynamically
+        if slide_type == "title":
+            layout_idx = 0
+        else:
+            if len(images) == 0:
+                layout_idx = 1  # title and content
+            elif len(images) >= 2:
+                layout_idx = 2  # two content
+            else:
+                # len(images) == 1
+                if content and content.strip():
+                    layout_idx = 2  # two content (one image and text)
+                else:
+                    layout_idx = 3  # title only (one image and no text)
 
         try:
             slide = self.prs.slides.add_slide(self.prs.slide_layouts[layout_idx])
@@ -81,15 +115,14 @@ class PresentationBuilder:
             cell_h = Inches(1.6)
             max_imgs = min(4, len(images))
 
-            for i in range(max_imgs):
-                path = images[i]
+            for i, img_path in enumerate(images[:max_imgs]):
                 row, col = divmod(i, 2)
                 left = left0 + col * (cell_w + Inches(0.3))
                 top = top0 + row * (cell_h + Inches(0.3))
                 try:
-                    slide.shapes.add_picture(path, left, top, width=cell_w, height=cell_h)
+                    slide.shapes.add_picture(img_path, left, top, width=cell_w, height=cell_h)
                 except Exception as e:
-                    logger.warning(f"Не удалось добавить изображение '{path}': {e}")
+                    logger.warning(f"Не удалось добавить изображение '{img_path}': {e}")
 
         return slide
 
@@ -101,5 +134,6 @@ class PresentationBuilder:
 
     def get_slide_count(self) -> int:
         return len(self.prs.slides)
+
 
 
