@@ -49,7 +49,19 @@ def _sc_get_text(sc: SlideContent | None) -> str:
     if hasattr(sc, "content_text"):
         return sc.content_text or ""
     if hasattr(sc, "content"):
-        return sc.content or ""
+        val = sc.content
+        # В нашей схеме SlideContent.content = JSON (dict), чаще всего {"text": "..."}.
+        # Экспорт ожидает строку.
+        if isinstance(val, dict):
+            if "text" in val and isinstance(val.get("text"), str):
+                return val["text"]
+            # fallback: сериализуем в строку, чтобы не падать в Pydantic
+            try:
+                import json
+                return json.dumps(val, ensure_ascii=False)
+            except Exception:
+                return str(val)
+        return val or ""
     if hasattr(sc, "text"):
         return sc.text or ""
     return ""
@@ -230,11 +242,30 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
     job.progress = 30
     await db.commit()
 
-    out = content_generator.generate_from_prompt(
+    # Генерация может быть очень долгой на CPU/GPU.
+    # Чтобы job не "висел" бесконечно в UI, запускаем генерацию в отдельном потоке
+    # и ограничиваем её по времени.
+    job.progress = 40
+    await db.commit()
+
+    async def _run_generation():
+        return content_generator.generate_from_prompt(
+            user_prompt=slide.prompt,
+            context=context_text,
+            audience=str(project.audience_type),
+        )
+
+    # таймаут (сек) — можно переопределить через env LLM_GENERATION_TIMEOUT_SEC
+    try:
+        timeout_sec = int(os.getenv("LLM_GENERATION_TIMEOUT_SEC", "180"))
+    except Exception:
+        timeout_sec = 180
+
+    out = await asyncio.wait_for(asyncio.to_thread(lambda: content_generator.generate_from_prompt(
         user_prompt=slide.prompt,
         context=context_text,
         audience=str(project.audience_type),
-    )
+    )), timeout=timeout_sec)
     generated_text = (out.get("content") or "").strip()
 
     job.progress = 70
@@ -396,6 +427,15 @@ async def _set_job_failed(db: AsyncSession, job: Job, exc: Exception) -> None:
     job.status = JobStatus.error
     job.progress = 100
     job.error_message = str(exc)
+    # если это job генерации — отметим и слайд как error, чтобы UI перестал крутиться
+    try:
+        if job.slide_id is not None:
+            slide = (await db.execute(select(Slide).where(Slide.id == job.slide_id))).scalar_one_or_none()
+            if slide is not None and hasattr(slide, "status"):
+                slide.status = SlideStatus.error
+    except Exception:
+        # не мешаем падению job
+        pass
     await db.commit()
 
 
