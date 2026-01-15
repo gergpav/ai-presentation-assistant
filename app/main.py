@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import logging
 from app.api.auth import router as auth_router
 from app.api.projects import router as projects_router
@@ -35,6 +36,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    # Нужно, чтобы фронтенд мог прочитать Content-Disposition и взять filename с расширением
+    expose_headers=["Content-Disposition"],
+)
 
 # Auth
 app.include_router(auth_router)
