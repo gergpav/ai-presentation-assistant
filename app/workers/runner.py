@@ -49,19 +49,7 @@ def _sc_get_text(sc: SlideContent | None) -> str:
     if hasattr(sc, "content_text"):
         return sc.content_text or ""
     if hasattr(sc, "content"):
-        val = sc.content
-        # В нашей схеме SlideContent.content = JSON (dict), чаще всего {"text": "..."}.
-        # Экспорт ожидает строку.
-        if isinstance(val, dict):
-            if "text" in val and isinstance(val.get("text"), str):
-                return val["text"]
-            # fallback: сериализуем в строку, чтобы не падать в Pydantic
-            try:
-                import json
-                return json.dumps(val, ensure_ascii=False)
-            except Exception:
-                return str(val)
-        return val or ""
+        return sc.content or ""
     if hasattr(sc, "text"):
         return sc.text or ""
     return ""
