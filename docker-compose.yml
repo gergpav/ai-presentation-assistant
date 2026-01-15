@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # PostgreSQL база данных
+  db:
+    image: postgres:16-alpine
+    container_name: ai-presentation-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_presentation}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-presentation-network
+    restart: unless-stopped
+
+  # Приложение (Frontend + Backend в одном контейнере)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8001}
+    container_name: ai-presentation-app
+    environment:
+      DATABASE_URL_ASYNC: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ai_presentation}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ai_presentation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-150}
+      TEMPERATURE: ${TEMPERATURE:-0.3}
+      PORT: 8001
+    ports:
+      - "${APP_PORT:-8001}:8001"  # Backend API
+      - "${FRONTEND_PORT:-80}:80"  # Frontend (nginx)
+    volumes:
+      - ./storage:/app/storage
+      - ./app:/app/app:ro  # Монтирование для разработки (read-only)
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - ai-presentation-network
+    restart: unless-stopped
+    # Для GPU поддержки (раскомментируйте при необходимости)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Worker для фоновых задач
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-presentation-worker
+    environment:
+      DATABASE_URL_ASYNC: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ai_presentation}
+      DATABASE_URL_SYNC: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-ai_presentation}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-150}
+      TEMPERATURE: ${TEMPERATURE:-0.3}
+    volumes:
+      - ./storage:/app/storage
+    depends_on:
+      - db
+      - app
+    command: python -m app.workers.runner
+    networks:
+      - ai-presentation-network
+    restart: unless-stopped
+    # Для GPU поддержки (раскомментируйте при необходимости)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  postgres_data:
+
+networks:
+  ai-presentation-network:
+    driver: bridge
