@@ -6,10 +6,12 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.db.models import Template
+from app.db.models.user import User
+from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -17,8 +19,8 @@ router = APIRouter(prefix="/templates", tags=["templates"])
 @router.post("/upload")
 async def upload_template(
     file: UploadFile = File(...),
-    user_id: int | None = None,
-    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     # 1) валидация
     if not file.filename:
@@ -38,18 +40,12 @@ async def upload_template(
     storage_path = (base_dir / disk_name).resolve()
 
     # 4) сохраняем файл
-    try:
-        with open(storage_path, "wb") as f:
-            f.write(file.file.read())
-    finally:
-        try:
-            file.file.close()
-        except Exception:
-            pass
+    content = await file.read()
+    storage_path.write_bytes(content)
 
     # 5) пишем в БД
     tmpl = Template(
-        user_id=user_id,
+        user_id=user.id,
         filename=file.filename,
         storage_path=str(storage_path),
         meta={
@@ -59,8 +55,8 @@ async def upload_template(
     )
 
     db.add(tmpl)
-    db.commit()
-    db.refresh(tmpl)
+    await db.commit()
+    await db.refresh(tmpl)
 
     return {
         "id": tmpl.id,

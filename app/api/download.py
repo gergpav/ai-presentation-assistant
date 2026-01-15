@@ -1,4 +1,5 @@
 from pathlib import Path
+import mimetypes
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import select
@@ -27,8 +28,19 @@ async def download_file(
         raise HTTPException(404, "File missing on disk")
 
     # Content-Disposition будет attachment с filename => браузер скачает
+    # И важно отдать корректный Content-Type, чтобы ОС показывала правильный тип файла.
+    filename = f.filename or path.name
+    media_type, _ = mimetypes.guess_type(filename)
+    # точнее для pptx (mimetypes иногда не знает)
+    if filename.lower().endswith(".pptx"):
+        media_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    elif filename.lower().endswith(".pdf"):
+        media_type = "application/pdf"
+    elif media_type is None:
+        media_type = "application/octet-stream"
+
     return FileResponse(
         path=str(path),
-        filename=f.filename,
-        media_type="application/octet-stream",
+        filename=filename,
+        media_type=media_type,
     )

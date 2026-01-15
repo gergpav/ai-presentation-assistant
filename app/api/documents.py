@@ -24,9 +24,9 @@ STORAGE_DIR.mkdir(exist_ok=True)
 
 class SlideDocumentOut(BaseModel):
     id: int
-    filename: str | None = None
-    size_bytes: int | None = None
-    mime_type: str | None = None
+    name: str  # для фронтенда используем "name" вместо "filename"
+    type: str  # для фронтенда используем "type" вместо "mime_type"
+    size: int  # для фронтенда используем "size" вместо "size_bytes"
 
 
 async def _ensure_slide_owner(db: AsyncSession, slide_id: int, user_id: int) -> Slide:
@@ -86,8 +86,9 @@ async def upload_slide_document(
 
     return SlideDocumentOut(
         id=sd.id,
-        filename=sd.filename,
-        size_bytes=len(content),
+        name=sd.filename or "file",
+        type=sd.mime_type or "application/octet-stream",
+        size=len(content),
     )
 
 
@@ -107,12 +108,19 @@ async def list_slide_documents(
 
     out = []
     for sd in res.scalars().all():
-        # size_bytes у SlideDocument нет — можно посчитать по файлу (опционально)
+        # Получаем размер файла из файловой системы или используем 0
+        from pathlib import Path
+        size = 0
+        if sd.storage_path:
+            path = Path(sd.storage_path)
+            if path.exists():
+                size = path.stat().st_size
+        
         out.append(SlideDocumentOut(
             id=sd.id,
-            filename=sd.filename,
-            mime_type=sd.mime_type,
-            size_bytes=None,
+            name=sd.filename or "file",
+            type=sd.mime_type or "application/octet-stream",
+            size=size,
         ))
     return out
 

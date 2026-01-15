@@ -140,7 +140,7 @@ async def get_latest_slide_content(
     q = (
         select(SlideContent)
         .where(SlideContent.slide_id == slide.id)
-        .order_by(desc(SlideContent.id))
+        .order_by(desc(SlideContent.version))
         .limit(1)
     )
     res = await db.execute(q)
@@ -148,21 +148,19 @@ async def get_latest_slide_content(
     if not sc:
         return {"slide_id": slide.id, "content": None}
 
-    # Универсально достанем текст, как и в воркере
-    if hasattr(sc, "content_text"):
-        text = sc.content_text
-    elif hasattr(sc, "content"):
-        text = sc.content
-    elif hasattr(sc, "text"):
-        text = sc.text
-    else:
-        text = None
+    # content это JSON (dict), извлекаем текст если есть поле text
+    content_text = None
+    if sc.content:
+        if isinstance(sc.content, dict):
+            content_text = sc.content.get("text", str(sc.content))
+        else:
+            content_text = str(sc.content)
 
     return {
         "slide_id": slide.id,
-        "version": getattr(sc, "version", None),
-        "content": text,
-        "created_at": getattr(sc, "created_at", None),
+        "version": sc.version,
+        "content": content_text,
+        "created_at": sc.created_at.isoformat() if sc.created_at else None,
     }
 
 
@@ -179,48 +177,40 @@ async def save_edited_slide_content(
     """
     slide = await _ensure_slide_owner(db, slide_id, user.id)
 
-    sc = SlideContent(slide_id=slide.id)
+    # Получаем последнюю версию для инкремента
+    res = await db.execute(
+        select(SlideContent)
+        .where(SlideContent.slide_id == slide.id)
+        .order_by(desc(SlideContent.version))
+        .limit(1)
+    )
+    last = res.scalar_one_or_none()
+    next_version = (last.version + 1) if last else 1
 
-    # Универсально положим текст (у тебя поле может называться content_text / content / text)
-    if hasattr(sc, "content_text"):
-        sc.content_text = payload.content
-    elif hasattr(sc, "content"):
-        sc.content = payload.content
-    elif hasattr(sc, "text"):
-        sc.text = payload.content
-    else:
-        raise HTTPException(status_code=500, detail="SlideContent text column not found")
-
-    # Если есть version — увеличим
-    if hasattr(sc, "version"):
-        res = await db.execute(
-            select(SlideContent)
-            .where(SlideContent.slide_id == slide.id)
-            .order_by(desc(SlideContent.version))
-            .limit(1)
-        )
-        last = res.scalar_one_or_none()
-        sc.version = (last.version + 1) if last else 1
+    # content это JSON (dict), сохраняем как {"text": content}
+    sc = SlideContent(
+        slide_id=slide.id,
+        version=next_version,
+        content={"text": payload.content},
+    )
 
     db.add(sc)
     await db.commit()
     await db.refresh(sc)
 
-    # Вернём тот же формат, что и /content/latest
-    if hasattr(sc, "content_text"):
-        text = sc.content_text
-    elif hasattr(sc, "content"):
-        text = sc.content
-    elif hasattr(sc, "text"):
-        text = sc.text
-    else:
-        text = None
+    # Возвращаем контент в том же формате
+    content_text = None
+    if sc.content:
+        if isinstance(sc.content, dict):
+            content_text = sc.content.get("text", str(sc.content))
+        else:
+            content_text = str(sc.content)
 
     return {
         "slide_id": slide.id,
-        "version": getattr(sc, "version", None),
-        "content": text,
-        "created_at": getattr(sc, "created_at", None),
+        "version": sc.version,
+        "content": content_text,
+        "created_at": sc.created_at.isoformat() if sc.created_at else None,
     }
 
 
@@ -292,6 +282,36 @@ async def update_slide(
         prompt=slide.prompt,
         status=slide.status,
     )
+
+
+class SlideReorderRequest(BaseModel):
+    slide_ids: list[int]  # новый порядок ID слайдов
+
+
+@router.post("/projects/{project_id}/slides/reorder")
+async def reorder_slides(
+    project_id: int,
+    payload: SlideReorderRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Изменение порядка слайдов"""
+    project = await _ensure_project_owner(db, project_id, user.id)
+
+    # Проверяем, что все слайды принадлежат проекту
+    res = await db.execute(
+        select(Slide).where(Slide.project_id == project_id, Slide.id.in_(payload.slide_ids))
+    )
+    slides = {s.id: s for s in res.scalars().all()}
+    if len(slides) != len(payload.slide_ids):
+        raise HTTPException(status_code=400, detail="Some slides not found or don't belong to project")
+
+    # Обновляем позиции
+    for position, slide_id in enumerate(payload.slide_ids, start=1):
+        slides[slide_id].position = position
+
+    await db.commit()
+    return {"message": "Slides reordered successfully"}
 
 
 @router.delete("/slides/{slide_id}", status_code=204)

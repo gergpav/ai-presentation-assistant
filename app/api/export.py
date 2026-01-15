@@ -1,16 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from pydantic import BaseModel
+from typing import Literal
 
 from app.db.session import get_db
-from app.services.auth_service import get_current_user
+from app.db.models.user import User
+from app.db.models.project import Project
 from app.db.models.job import Job
 from app.db.models.enums import JobType, JobStatus
+from app.services.auth_service import get_current_user
 
 router = APIRouter(tags=["export"])
 
 class ExportRequest(BaseModel):
-    format: str  # "pptx" | "pdf"
+    format: Literal["pptx", "pdf"]
 
 class ExportResponse(BaseModel):
     job_id: int
@@ -19,11 +23,16 @@ class ExportResponse(BaseModel):
 async def export_project(
     project_id: int,
     payload: ExportRequest,
-    user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if payload.format not in ("pptx", "pdf"):
-        raise HTTPException(400, "Invalid format")
+    # Проверяем, что проект принадлежит пользователю
+    res = await db.execute(
+        select(Project).where(Project.id == project_id, Project.user_id == user.id)
+    )
+    project = res.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
     job = Job(
         user_id=user.id,

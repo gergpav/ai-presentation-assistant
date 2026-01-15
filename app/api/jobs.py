@@ -30,7 +30,8 @@ async def get_job(
 
     return JobOut(
         id=job.id,
-        status=str(job.status),
+        # Фронтенд ожидает значения enum: queued|running|done|error (а не "JobStatus.queued")
+        status=getattr(job.status, "value", str(job.status)),
         progress=getattr(job, "progress", None),
         result_file_id=getattr(job, "result_file_id", None),
         error_message=getattr(job, "error_message", None),
