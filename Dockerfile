@@ -11,7 +11,7 @@ WORKDIR /app/frontend
 COPY frontend/package*.json ./
 
 # Установка зависимостей
-RUN npm ci
+RUN npm install
 
 # Копирование исходного кода фронтенда
 COPY frontend/ .
