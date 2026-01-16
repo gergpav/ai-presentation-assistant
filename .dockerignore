@@ -59,7 +59,7 @@ storage/*.docx
 docker-compose*.yml
 Dockerfile*
 .dockerignore
-docker-entrypoint.sh
+# docker-entrypoint.sh - НЕ исключаем, нужен для сборки
 
 # Tests
 .pytest_cache/
