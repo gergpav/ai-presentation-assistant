@@ -55,7 +55,7 @@ jobs:
   # Развертывание на self-hosted runner
   deploy:
     name: Deploy to Local Runner
-    runs-on: self-hosted  # Локальный runner
+    runs-on: self-hosted  # Linux self-hosted runner
     needs: build-and-test
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
     
@@ -67,10 +67,12 @@ jobs:
           echo "ℹ️  If using self-hosted runner, build image locally or load from registry"
       
       - name: Stop existing containers
+        shell: bash
         run: |
-          docker-compose down || true
+          docker compose down || true
       
       - name: Create .env file
+        shell: bash
         run: |
           if [ ! -f .env ]; then
             cp env.example .env
@@ -78,36 +80,54 @@ jobs:
           fi
       
       - name: Start services
+        shell: bash
         run: |
-          docker-compose up -d --build
+          docker compose up -d --build
+      
+      - name: Check containers status
+        shell: bash
+        run: |
+          echo "📊 Checking containers status..."
+          docker compose ps
+          sleep 5
       
       - name: Wait for services
+        shell: bash
         run: |
           echo "⏳ Waiting for services to be ready..."
-          sleep 10
-          for i in {1..30}; do
-            if curl -f http://localhost:8001/health > /dev/null 2>&1; then
+          sleep 15
+          for i in {1..60}; do
+            if docker compose ps | grep -q "Up" && curl -f http://localhost:8001/health > /dev/null 2>&1; then
               echo "✅ Backend is ready"
               break
             fi
-            echo "Waiting... ($i/30)"
-            sleep 2
+            echo "Waiting... ($i/60)"
+            docker compose ps
+            sleep 3
           done
       
       - name: Run migrations
+        shell: bash
         run: |
-          docker-compose exec -T app python -m alembic upgrade head || true
+          echo "📦 Running database migrations..."
+          docker compose exec -T app python -m alembic upgrade head || echo "⚠️  Migrations failed, continuing..."
       
       - name: Health check
+        shell: bash
         run: |
           echo "🏥 Checking service health..."
-          curl -f http://localhost:8001/health || exit 1
-          curl -f http://localhost:80/ || exit 1
+          echo "Checking backend..."
+          curl -f http://localhost:8001/health || (echo "❌ Backend health check failed" && docker compose logs app --tail=50 && exit 1)
+          echo "✅ Backend is healthy"
+          echo "Checking frontend..."
+          curl -f http://localhost:80/ || (echo "❌ Frontend health check failed" && docker compose logs app --tail=50 && exit 1)
+          echo "✅ Frontend is healthy"
           echo "✅ All services are healthy"
       
       - name: Show service status
+        shell: bash
         run: |
-          docker-compose ps
+          docker compose ps
           echo ""
           echo "🌐 Frontend: http://localhost:80"
           echo "🔧 Backend API: http://localhost:8001"
