@@ -11,7 +11,7 @@ sleep 2
 
 # Применение миграций
 echo "📦 Running database migrations..."
-python -m alembic upgrade head || echo "⚠️  Migration failed, continuing..."
+alembic upgrade head || echo "⚠️  Migration failed, continuing..."
 
 # Запуск nginx для фронтенда в фоне
 echo "🌐 Starting nginx for frontend..."
