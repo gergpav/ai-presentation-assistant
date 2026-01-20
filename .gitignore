@@ -4,3 +4,6 @@ venv
 __pycache__/
 *.pyc
 .env
+/frontend/node_modules/
+torch-2.5.1-cp311-cp311-win_amd64.whl
+/storage/
