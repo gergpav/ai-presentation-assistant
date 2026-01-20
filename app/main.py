@@ -1,3 +1,13 @@
+# КРИТИЧНО: Устанавливаем переменные окружения ДО импорта PyTorch/transformers
+# для предотвращения попыток использования CUDA
+import os
+
+# Принудительно отключаем CUDA (по умолчанию true для избежания ошибок)
+force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
+if force_cpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,12 +83,6 @@ app.include_router(templates_router)
 def root():
     return {
         "message": "AI Presentation Assistant is running 🚀",
-        "endpoints": {
-            "upload": "/upload",
-            "generate": "/generate/presentation",
-            "llm_test": "/generate/test-llm",
-            "llm_status": "/generate/llm-status"
-        }
     }
 
 
