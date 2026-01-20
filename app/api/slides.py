@@ -22,7 +22,7 @@ class SlideCreate(BaseModel):
 
 
 class SlideUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=255)
+    title: str | None = Field(default=None, max_length=255)  # Убрано min_length=1, чтобы разрешить пустую строку
     visual_type: SlideVisualType | None = None
     prompt: str | None = None
     position: int | None = None
@@ -262,7 +262,8 @@ async def update_slide(
 
     # простое обновление полей (перестановку позиций сделаем отдельным endpoint'ом позже)
     if payload.title is not None:
-        slide.title = payload.title
+        # Разрешаем пустую строку - устанавливаем её как есть
+        slide.title = payload.title if payload.title else ""  # Пустая строка разрешена
     if payload.visual_type is not None:
         slide.visual_type = payload.visual_type
     if payload.prompt is not None:
