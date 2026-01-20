@@ -40,7 +40,11 @@ WORKDIR /app
 
 # Копирование requirements и установка зависимостей Python
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Обновляем pip перед установкой зависимостей
+RUN pip install --upgrade pip setuptools wheel
+# Устанавливаем зависимости с --upgrade для обновления хешей зависимостей
+# Это решает проблему с несовпадающими хешами пакетов (например, hf-xet)
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Копирование кода бекенда
 COPY app/ ./app/
