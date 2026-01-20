@@ -44,10 +44,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel
 # Устанавливаем зависимости с --upgrade для обновления хешей зависимостей
 # Это решает проблему с несовпадающими хешами пакетов (например, hf-xet)
-# bitsandbytes устанавливаем отдельно, так как может требовать специальной сборки
-RUN pip install --no-cache-dir --upgrade -r requirements.txt || \
-    (pip install --no-cache-dir --upgrade -r requirements.txt --no-deps && \
-     pip install --no-cache-dir bitsandbytes>=0.41.0)
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Копирование кода бекенда
 COPY app/ ./app/
