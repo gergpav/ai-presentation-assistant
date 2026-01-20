@@ -1,8 +1,16 @@
 # app/workers/runner.py
+# КРИТИЧНО: Устанавливаем переменные окружения ДО импорта PyTorch/transformers
+import os
+
+# Принудительно отключаем CUDA (по умолчанию true для избежания ошибок)
+force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
+if force_cpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import asyncio
 import logging
 import uuid
-import os
 from sqlalchemy.orm import Session, joinedload
 from pathlib import Path
 from typing import Optional
@@ -236,25 +244,34 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
     job.progress = 40
     await db.commit()
 
-    async def _run_generation():
-        return content_generator.generate_from_prompt(
-            user_prompt=slide.prompt,
-            context=context_text,
-            audience=str(project.audience_type),
-        )
-
     # таймаут (сек) — можно переопределить через env LLM_GENERATION_TIMEOUT_SEC
+    # По умолчанию 600 секунд (10 минут) для CPU генерации, которая может быть медленной
     try:
-        timeout_sec = int(os.getenv("LLM_GENERATION_TIMEOUT_SEC", "180"))
+        timeout_sec = int(os.getenv("LLM_GENERATION_TIMEOUT_SEC", "600"))
     except Exception:
-        timeout_sec = 180
+        timeout_sec = 600
 
-    out = await asyncio.wait_for(asyncio.to_thread(lambda: content_generator.generate_from_prompt(
-        user_prompt=slide.prompt,
-        context=context_text,
-        audience=str(project.audience_type),
-    )), timeout=timeout_sec)
-    generated_text = (out.get("content") or "").strip()
+    try:
+        logger.info(f"Начинаем генерацию слайда (таймаут: {timeout_sec}с)")
+        out = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: content_generator.generate_from_prompt(
+                    user_prompt=slide.prompt,
+                    context=context_text,
+                    audience=str(project.audience_type),
+                )
+            ),
+            timeout=timeout_sec
+        )
+        generated_text = (out.get("content") or "").strip()
+    except asyncio.TimeoutError:
+        error_msg = (
+            f"Таймаут генерации ({timeout_sec}с). "
+            "Генерация на CPU может занимать много времени. "
+            "Попробуйте уменьшить MAX_NEW_TOKENS в настройках или увеличить LLM_GENERATION_TIMEOUT_SEC."
+        )
+        logger.error(error_msg)
+        raise TimeoutError(error_msg)
 
     job.progress = 70
     await db.commit()
