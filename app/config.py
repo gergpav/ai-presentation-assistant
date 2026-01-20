@@ -2,12 +2,12 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Рекомендуется использовать Qwen2.5-3B-Instruct для CPU (быстрее в 2-3 раза)
-    # Для более умной модели можно использовать:
-    # - Qwen/Qwen2.5-7B-Instruct (лучше качество, требует квантование или больше RAM)
+    # Рекомендуется использовать Qwen2.5-7B-Instruct для лучшего качества генерации
+    # Для более быстрой модели можно использовать:
+    # - Qwen/Qwen2.5-3B-Instruct (быстрее в 2-3 раза на CPU)
     # - meta-llama/Llama-3.2-3B-Instruct (альтернатива 3B, немного умнее)
     # Можно изменить через переменную окружения LLM_MODEL
-    LLM_MODEL: str = "Qwen/Qwen2.5-3B-Instruct"
+    LLM_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
     # Увеличено до 250 для генерации более полного контента слайдов
     # Можно изменить через переменную окружения MAX_NEW_TOKENS (рекомендуется 200-300 для качественного контента)
     MAX_NEW_TOKENS: int = 250
@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     # Использовать 8-bit квантование для моделей 7B+ на CPU
     # Уменьшает потребление памяти в 2 раза, скорость почти не страдает
     # Требует установки: pip install bitsandbytes
-    USE_QUANTIZATION: bool = False
+    # Рекомендуется включить для модели 7B на CPU
+    USE_QUANTIZATION: bool = True
 
     DATABASE_URL_ASYNC: str
     DATABASE_URL_SYNC: str
