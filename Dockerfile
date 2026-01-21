@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     libpq-dev \
     nginx \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Рабочая директория
@@ -45,6 +46,9 @@ RUN pip install --upgrade pip setuptools wheel
 # Устанавливаем зависимости с --upgrade для обновления хешей зависимостей
 # Это решает проблему с несовпадающими хешами пакетов (например, hf-xet)
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
+
+# Примечание: kernels может показать предупреждение о невозможности установить CPU ядро
+# Это не критично - bitsandbytes будет работать без оптимизации, просто медленнее
 
 # Копирование кода бекенда
 COPY app/ ./app/
