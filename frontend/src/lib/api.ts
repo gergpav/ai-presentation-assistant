@@ -122,7 +122,10 @@ class ApiClient {
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> {
-    const url = `${this.baseUrl}${endpoint}`;
+    // Нормализуем URL: убираем двойные слеши
+    const normalizedBaseUrl = this.baseUrl.replace(/\/$/, ''); // Убираем слеш в конце baseUrl
+    const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`; // Убеждаемся, что endpoint начинается со слеша
+    const url = `${normalizedBaseUrl}${normalizedEndpoint}`;
     const headers: HeadersInit = {
       'Content-Type': 'application/json',
       ...options.headers,
