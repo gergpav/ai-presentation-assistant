@@ -17,8 +17,8 @@ RUN npm install
 COPY frontend/ .
 
 # Сборка фронтенда
-# Используем production build с правильным API URL
-ARG VITE_API_BASE_URL=http://localhost:8001
+# Используем production build с правильным API URL (относительный путь для работы через nginx)
+ARG VITE_API_BASE_URL=/api
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 
