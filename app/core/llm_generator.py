@@ -7,6 +7,21 @@ force_cpu_env = os.getenv("FORCE_CPU", "true").lower() == "true"
 if force_cpu_env and "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+# Настройки HuggingFace Hub для надежной загрузки моделей
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")  # Отключаем hf_transfer для совместимости
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")  # 10 минут таймаут для загрузки
+os.environ.setdefault("REQUESTS_TIMEOUT", "600")  # Таймаут для requests
+
+# Подавляем предупреждение о kernels CPU ядре (не критично, bitsandbytes работает без него)
+import warnings
+import logging
+warnings.filterwarnings("ignore", message=".*Failed to load CPU gemm_4bit_forward.*")
+warnings.filterwarnings("ignore", message=".*Cannot install kernel from repo kernels-community.*")
+# Подавляем предупреждения от bitsandbytes/kernels
+logging.getLogger("bitsandbytes").setLevel(logging.ERROR)
+logging.getLogger("kernels").setLevel(logging.ERROR)
+
 import torch
 from torch import dtype
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -36,7 +51,19 @@ class ContentGenerator:
         self.is_loaded = False
         self.tokenizer = None
         self.model = None
-        self._load_model()
+        self._loading = False
+        # Ленивая загрузка - загружаем модель только при первом использовании
+        # Это позволяет избежать загрузки модели в app контейнере, если она не нужна
+        # Модель будет загружена при первом вызове generate_from_prompt или health_check
+    
+    def _ensure_loaded(self):
+        """Обеспечивает загрузку модели при первом использовании"""
+        if not self.is_loaded and not self._loading:
+            self._loading = True
+            try:
+                self._load_model()
+            finally:
+                self._loading = False
 
     def _load_model(self):
         try:
@@ -54,25 +81,31 @@ class ContentGenerator:
                     logger.warning(f"⚠️  Не удалось авторизоваться в HuggingFace: {e}")
 
             # Загружаем токенайзер с обработкой сетевых ошибок
-            max_retries = 3
+            max_retries = 5  # Увеличено с 3 до 5
             retry_count = 0
             tokenizer_loaded = False
             
             while retry_count < max_retries and not tokenizer_loaded:
                 try:
+                    logger.info(f"Загрузка токенайзера (попытка {retry_count + 1}/{max_retries})...")
                     self.tokenizer = AutoTokenizer.from_pretrained(
                         settings.LLM_MODEL,
                         trust_remote_code=True,
                         token=hf_token if hf_token else None,
+                        timeout=600,  # 10 минут таймаут
                     )
                     tokenizer_loaded = True
+                    logger.info("✅ Токенайзер загружен успешно")
                 except Exception as e:
                     retry_count += 1
                     if retry_count < max_retries:
+                        wait_time = 10 * retry_count  # Увеличена задержка: 10, 20, 30, 40 секунд
                         logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки токенайзера не удалась: {e}")
+                        logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                         import time
-                        time.sleep(5 * retry_count)  # Экспоненциальная задержка
+                        time.sleep(wait_time)
                     else:
+                        logger.error(f"❌ Не удалось загрузить токенайзер после {max_retries} попыток")
                         raise
 
             # Принудительно используем CPU для sm_120 (RTX 5060 Ti) из-за несовместимости
@@ -101,39 +134,65 @@ class ContentGenerator:
             if use_quantization:
                 # Пробуем использовать 8-bit квантование для экономии памяти
                 try:
-                    from transformers import BitsAndBytesConfig
+                    # Подавляем предупреждения от bitsandbytes при импорте
+                    import sys
+                    from io import StringIO
+                    old_stderr = sys.stderr
+                    sys.stderr = StringIO()
+                    try:
+                        from transformers import BitsAndBytesConfig
+                    finally:
+                        sys.stderr = old_stderr
                     
+                    # Для CPU нужны специальные настройки квантования
                     quantization_config = BitsAndBytesConfig(
                         load_in_8bit=True,
                         llm_int8_threshold=6.0,
                         llm_int8_has_fp16_weight=False,
+                        llm_int8_enable_fp32_cpu_offload=True,  # Разрешаем offload на CPU
                     )
                     
                     logger.info("Загрузка модели с 8-bit квантованием (уменьшает память в 2 раза)")
                     # Загрузка модели с retry логикой
-                    max_retries = 3
+                    max_retries = 5  # Увеличено с 3 до 5
                     retry_count = 0
                     model_loaded = False
                     
                     while retry_count < max_retries and not model_loaded:
                         try:
-                            self.model = AutoModelForCausalLM.from_pretrained(
-                                settings.LLM_MODEL,
-                                trust_remote_code=True,
-                                quantization_config=quantization_config,
-                                device_map="auto",
-                                token=hf_token if hf_token else None,
-                            )
+                            logger.info(f"Загрузка модели с квантованием (попытка {retry_count + 1}/{max_retries})...")
+                            # Для CPU используем явный device_map="cpu" с правильными настройками
+                            if not use_cuda:
+                                # Для CPU квантования нужен явный device_map="cpu"
+                                self.model = AutoModelForCausalLM.from_pretrained(
+                                    settings.LLM_MODEL,
+                                    trust_remote_code=True,
+                                    quantization_config=quantization_config,
+                                    device_map="cpu",
+                                    token=hf_token if hf_token else None,
+                                )
+                            else:
+                                # Для GPU используем "auto"
+                                self.model = AutoModelForCausalLM.from_pretrained(
+                                    settings.LLM_MODEL,
+                                    trust_remote_code=True,
+                                    quantization_config=quantization_config,
+                                    device_map="auto",
+                                    token=hf_token if hf_token else None,
+                                )
                             model_loaded = True
+                            logger.info("✅ Модель загружена с квантованием")
                         except Exception as e:
                             retry_count += 1
                             if retry_count < max_retries:
+                                wait_time = 15 * retry_count  # Увеличена задержка: 15, 30, 45, 60 секунд
                                 logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки модели не удалась: {e}")
+                                logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                                 import time
-                                time.sleep(10 * retry_count)  # Экспоненциальная задержка
+                                time.sleep(wait_time)
                             else:
+                                logger.error(f"❌ Не удалось загрузить модель после {max_retries} попыток")
                                 raise
-                    logger.info("✅ Модель загружена с квантованием")
                 except ImportError:
                     logger.warning("bitsandbytes не установлен. Установите: pip install bitsandbytes")
                     logger.info("Загружаем модель без квантования")
@@ -148,32 +207,37 @@ class ContentGenerator:
                     self.model = AutoModelForCausalLM.from_pretrained(
                         settings.LLM_MODEL,
                         trust_remote_code=True,
-                        torch_dtype=torch.float16,
+                        dtype=torch.float16,  # Используем dtype вместо torch_dtype
                         device_map="auto",
                     )
                 else:
                     # Принудительно загружаем на CPU с retry логикой
-                    max_retries = 3
+                    max_retries = 5  # Увеличено с 3 до 5
                     retry_count = 0
                     model_loaded = False
                     
                     while retry_count < max_retries and not model_loaded:
                         try:
+                            logger.info(f"Загрузка модели на CPU (попытка {retry_count + 1}/{max_retries})...")
                             self.model = AutoModelForCausalLM.from_pretrained(
                                 settings.LLM_MODEL,
                                 trust_remote_code=True,
-                                torch_dtype=torch.float32,
+                                dtype=torch.float32,  # Используем dtype вместо torch_dtype
                                 device_map="cpu",  # Явно указываем CPU
                                 token=hf_token if hf_token else None,
                             )
                             model_loaded = True
+                            logger.info("✅ Модель загружена на CPU")
                         except Exception as e:
                             retry_count += 1
                             if retry_count < max_retries:
+                                wait_time = 15 * retry_count  # Увеличена задержка: 15, 30, 45, 60 секунд
                                 logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки модели не удалась: {e}")
+                                logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                                 import time
-                                time.sleep(10 * retry_count)  # Экспоненциальная задержка
+                                time.sleep(wait_time)
                             else:
+                                logger.error(f"❌ Не удалось загрузить модель после {max_retries} попыток")
                                 raise
                     # Дополнительно перемещаем модель на CPU (на случай если device_map не сработал)
                     if not use_quantization:  # Квантованные модели нельзя перемещать
@@ -254,12 +318,14 @@ class ContentGenerator:
         """
         Генерация содержимого ОДНОГО слайда по пользовательскому промпту,
         с учётом аудитории и контекста из документов.
-
+        
         Использует chat template Qwen для корректного формата запросов и
         ограничивает длину генерируемого текста через settings.MAX_NEW_TOKENS.
         """
+        # Ленивая загрузка модели при первом использовании
+        self._ensure_loaded()
         if not self.is_loaded:
-            raise Exception("Модель не загружена")
+            raise RuntimeError("Модель не загружена")
 
         # Инструкция по аудитории
         audience_instr = self.audience_instructions(audience)
@@ -423,6 +489,8 @@ class ContentGenerator:
             return "\n".join(lines)
 
     def health_check(self) -> Dict[str, Any]:
+        # Для health_check не загружаем модель принудительно, чтобы не вызывать OOM
+        # Модель загрузится автоматически при первом использовании generate_from_prompt
         return {
             "status": "healthy" if self.is_loaded else "not_loaded",
             "model": settings.LLM_MODEL
