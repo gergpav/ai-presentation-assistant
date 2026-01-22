@@ -33,4 +33,9 @@ nginx
 
 # Запуск FastAPI
 echo "🔧 Starting FastAPI backend..."
-exec python -m uvicorn app.main:app --reload --host 0.0.0.0 --port ${PORT:-8001}
+# Используем --reload только если установлена переменная DEV_MODE=true
+if [ "${DEV_MODE:-false}" = "true" ]; then
+    exec python -m uvicorn app.main:app --reload --host 0.0.0.0 --port ${PORT:-8001}
+else
+    exec python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}
+fi
