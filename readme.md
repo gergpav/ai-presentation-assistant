@@ -48,6 +48,6 @@ python-pptx - генерация PowerPoint презентаций
 ## Бизнес-ценность
 Решение сокращает трудозатраты на 80%, обеспечивает единый стандарт презентаций и позволяет командам фокусироваться на содержании, а не на форматировании.
 
-Технологии: Python, FastAPI, Qwen, Sentence Transformers, OpenAI PPTX, HuggingFace
+Технологии: Python, FastAPI, Qwen, Sentence Transformers, python-pptx, Stability AI Stable Diffusion, HuggingFace
 Лицензии: MIT/Apache 2.0
 Платформа: Unix-совместимые системы
