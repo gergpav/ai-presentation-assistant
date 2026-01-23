@@ -7,11 +7,12 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.core.embeddings import document_index
 from app.core.llm_generator import content_generator
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 LLM_SEMAPHORE = asyncio.Semaphore(1)  # чтобы не было параллельных генераций
-LLM_TIMEOUT_SEC = 600
+LLM_TIMEOUT_SEC = settings.LLM_GENERATION_TIMEOUT_SEC  # Таймаут из конфигурации
 
 
 # ============ МОДЕЛИ ============
@@ -36,10 +37,14 @@ class SlideExport(BaseModel):
     - title: заголовок
     - content: сгенерированный текст (буллеты)
     - images: картинки (если есть)
+    - layout: тип макета слайда (title, two_content, title_only, title_and_content)
+    - visual_type: тип визуализации (text, chart, table, image)
     """
     title: str
     content: str
     images: List[str] = []
+    layout: str = "title_and_content"
+    visual_type: str = "text"
 
 
 class ExportRequest(BaseModel):
