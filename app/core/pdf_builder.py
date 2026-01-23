@@ -1,21 +1,114 @@
 # app/core/pdf_builder.py
 import io
 import logging
+import os
 from typing import List
+from pathlib import Path
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import landscape, A4
 from reportlab.lib.units import cm
+from reportlab.platypus import Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 from app.utils.helpers import SlideExport
 
 logger = logging.getLogger(__name__)
+
+# Регистрируем TTF-шрифты с поддержкой Unicode/кириллицы
+# Используем DejaVu Sans - свободный шрифт с отличной поддержкой Unicode
+_FONTS_REGISTERED = False
+
+def _register_fonts():
+    """Регистрирует TTF-шрифты с поддержкой кириллицы"""
+    global _FONTS_REGISTERED
+    if _FONTS_REGISTERED:
+        return
+    
+    # Список путей для поиска шрифтов (системные пути Linux/Windows)
+    font_paths = [
+        # Linux системные пути
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        # Windows системные пути
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/times.ttf",
+        "C:/Windows/Fonts/timesbd.ttf",
+        # macOS системные пути
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        # Альтернативные пути
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    
+    # Имена шрифтов для использования в reportlab
+    regular_font_name = "DejaVuSans"
+    bold_font_name = "DejaVuSans-Bold"
+    
+    # Пытаемся найти и зарегистрировать DejaVu Sans
+    regular_font_path = None
+    bold_font_path = None
+    
+    for path in font_paths:
+        if os.path.exists(path):
+            if "Bold" in path or "bd" in path.lower() or "bold" in path.lower():
+                if not bold_font_path:
+                    bold_font_path = path
+            else:
+                if not regular_font_path and ("DejaVu" in path or "Arial" in path or "Liberation" in path):
+                    regular_font_path = path
+    
+    # Если не нашли DejaVu, пытаемся использовать Arial или Liberation Sans
+    if not regular_font_path:
+        for path in font_paths:
+            if os.path.exists(path) and ("arial" in path.lower() or "liberation" in path.lower()):
+                regular_font_path = path
+                if "bold" not in path.lower() and "bd" not in path.lower():
+                    break
+    
+    # Регистрируем найденные шрифты
+    try:
+        if regular_font_path:
+            pdfmetrics.registerFont(TTFont(regular_font_name, regular_font_path))
+            logger.info(f"Зарегистрирован шрифт для кириллицы: {regular_font_name} из {regular_font_path}")
+        else:
+            # Если не нашли системные шрифты, используем встроенные шрифты reportlab
+            # Но они не поддерживают кириллицу, поэтому будет предупреждение
+            logger.warning("Не найдены TTF-шрифты с поддержкой кириллицы. Кириллица может отображаться некорректно.")
+            logger.warning("Рекомендуется установить DejaVu Sans: apt-get install fonts-dejavu")
+            regular_font_name = "Helvetica"  # Fallback
+        
+        if bold_font_path:
+            pdfmetrics.registerFont(TTFont(bold_font_name, bold_font_path))
+            logger.info(f"Зарегистрирован жирный шрифт для кириллицы: {bold_font_name} из {bold_font_path}")
+        else:
+            bold_font_name = regular_font_name  # Используем обычный шрифт как fallback
+    except Exception as e:
+        logger.error(f"Ошибка при регистрации шрифтов: {e}")
+        regular_font_name = "Helvetica"
+        bold_font_name = "Helvetica-Bold"
+    
+    # Сохраняем имена шрифтов для использования
+    _register_fonts.regular_font = regular_font_name
+    _register_fonts.bold_font = bold_font_name
+    _FONTS_REGISTERED = True
+
+# Инициализируем шрифты при импорте модуля
+_register_fonts()
 
 
 def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
     """
     Генерация PDF-презентации напрямую из структуры слайдов.
     Каждый слайд = отдельная страница PDF.
+    Поддерживает разные типы визуализации и макеты.
     """
     buffer = io.BytesIO()
 
@@ -24,45 +117,75 @@ def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
     c = canvas.Canvas(buffer, pagesize=page_size)
     width, height = page_size
 
+    # Стили для текста
+    styles = getSampleStyleSheet()
+    normal_style = ParagraphStyle(
+        'CustomNormal',
+        parent=styles['Normal'],
+        fontSize=14,
+        leading=18,
+        leftIndent=0,
+        spaceAfter=6,
+    )
+    bullet_style = ParagraphStyle(
+        'CustomBullet',
+        parent=normal_style,
+        leftIndent=20,
+        bulletIndent=10,
+    )
+
     for idx, slide in enumerate(slides, start=1):
+        layout_type = getattr(slide, "layout", "title_and_content")
+        visual_type = getattr(slide, "visual_type", "text")
+        
         # --- Заголовок ---
         title = slide.title or "Слайд"
-        c.setFont("Helvetica-Bold", 24)
-        c.drawString(2 * cm, height - 2 * cm, title)
+        # Используем Paragraph с TTF-шрифтом для поддержки Unicode/кириллицы
+        title_style = ParagraphStyle(
+            'TitleStyle',
+            parent=styles['Normal'],
+            fontSize=24,
+            fontName=_register_fonts.bold_font,  # Используем зарегистрированный TTF-шрифт
+            leading=28,
+        )
+        title_para = Paragraph(title, title_style)
+        title_para.wrapOn(c, width - 4 * cm, height)
+        title_para.drawOn(c, 2 * cm, height - 2 * cm - title_para.height)
 
-        # --- Подзаголовок: аудитория + номер слайда ---
-        subtitle = f"Аудитория: {audience} • Слайд {idx} из {len(slides)}"
-        c.setFont("Helvetica", 10)
-        c.drawString(2 * cm, height - 3 * cm, subtitle)
+        # --- Подзаголовок: аудитория + номер слайда (только если не титульный слайд) ---
+        if layout_type != "title":
+            subtitle = f"Аудитория: {audience} • Слайд {idx} из {len(slides)}"
+            subtitle_style = ParagraphStyle(
+                'SubtitleStyle',
+                parent=styles['Normal'],
+                fontSize=10,
+                fontName=_register_fonts.regular_font,  # Используем зарегистрированный TTF-шрифт
+                leading=12,
+            )
+            subtitle_para = Paragraph(subtitle, subtitle_style)
+            subtitle_para.wrapOn(c, width - 4 * cm, height)
+            subtitle_para.drawOn(c, 2 * cm, height - 3 * cm - subtitle_para.height)
 
-        # --- Основной текст (буллеты) ---
-        text_y = height - 4 * cm
-        c.setFont("Helvetica", 14)
+        # Для титульного слайда или слайда только с заголовком - пропускаем контент
+        if layout_type == "title" or layout_type == "title_only":
+            c.showPage()
+            continue
 
-        # content уже приходит как набор строк с \n,
-        # упрощённо считаем, что пользователь не делает по 300 символов в строке
-        for raw_line in (slide.content or "").split("\n"):
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            # гарантируем буллет
-            if line.startswith("•"):
-                bullet_text = line
-            else:
-                bullet_text = f"• {line}"
-
-            c.drawString(2.5 * cm, text_y, bullet_text)
-            text_y -= 0.9 * cm
-
-            # не вываливаемся за нижний край
-            if text_y < 4 * cm:
-                break
+        # --- Обработка контента в зависимости от типа визуализации ---
+        content_y = height - 4 * cm
+        
+        if visual_type == "table":
+            _draw_table(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
+        elif visual_type == "chart":
+            _draw_chart(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
+        elif visual_type == "image":
+            # Для изображений показываем описание как текст
+            _draw_text_content(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
+        else:  # text
+            _draw_text_content(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
 
         # --- Картинки (если используешь images) ---
-        # Предполагаем, что slide.images: List[str] — пути к файлам
         images = getattr(slide, "images", []) or []
-
         if images:
             img_y = 2.5 * cm
             img_x = 2 * cm
@@ -91,3 +214,185 @@ def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
+
+
+def _draw_text_content(c: canvas.Canvas, content: str, x: float, y: float, width: float, max_height: float):
+    """Рисует текстовый контент на PDF с правильным форматированием и поддержкой Unicode/кириллицы"""
+    if not content or not content.strip():
+        return
+    
+    styles = getSampleStyleSheet()
+    current_y = y
+    line_height = 0.9 * cm
+    
+    for raw_line in content.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Убираем markdown форматирование
+        line = line.replace("**", "").replace("*", "").replace("__", "").replace("_", "")
+        
+        # Убираем маркеры списка если есть (они будут добавлены автоматически)
+        if line.startswith("•"):
+            line = line[1:].strip()
+        elif line.startswith("-"):
+            line = line[1:].strip()
+        
+        # Определяем жирный текст (если вся строка заглавными или содержит ключевые слова)
+        is_bold = line.isupper() or any(kw in line.lower() for kw in ['важно', 'ключевой', 'основной'])
+        
+        # Используем Paragraph с TTF-шрифтом для поддержки Unicode/кириллицы
+        if is_bold:
+            para_style = ParagraphStyle(
+                'BoldText',
+                parent=styles['Normal'],
+                fontSize=14,
+                fontName=_register_fonts.bold_font,  # Используем зарегистрированный TTF-шрифт
+                leading=18,
+                leftIndent=0.5 * cm,
+                bulletIndent=0.5 * cm,
+            )
+        else:
+            para_style = ParagraphStyle(
+                'NormalText',
+                parent=styles['Normal'],
+                fontSize=14,
+                fontName=_register_fonts.regular_font,  # Используем зарегистрированный TTF-шрифт
+                leading=18,
+                leftIndent=0.5 * cm,
+                bulletIndent=0.5 * cm,
+            )
+        
+        # Экранируем HTML-специальные символы для Paragraph
+        line_escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        
+        # Создаем Paragraph с маркером списка
+        para = Paragraph(f"• {line_escaped}", para_style)
+        para.wrapOn(c, width, max_height)
+        
+        # Проверяем, помещается ли параграф
+        if current_y - para.height < 4 * cm:
+            break
+        
+        para.drawOn(c, x, current_y - para.height)
+        current_y -= para.height
+        
+        # Не вываливаемся за нижний край
+        if current_y < 4 * cm:
+            break
+
+
+def _draw_table(c: canvas.Canvas, content: str, x: float, y: float, width: float, max_height: float):
+    """Рисует таблицу на PDF"""
+    if not content or not content.strip():
+        return
+    
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    if not lines:
+        return
+    
+    # Парсим таблицу
+    table_data = []
+    for line in lines:
+        cells = [cell.strip() for cell in line.split('|')]
+        if len(cells) >= 2:
+            table_data.append(cells)
+    
+    if not table_data or len(table_data) < 2:
+        # Если не таблица, рисуем как текст
+        _draw_text_content(c, content, x, y, width, max_height)
+        return
+    
+    # Определяем размеры ячеек
+    num_cols = len(table_data[0])
+    num_rows = len(table_data)
+    cell_width = width / num_cols
+    cell_height = min(max_height / num_rows, 1.5 * cm)
+    
+    current_y = y
+    
+    for row_idx, row in enumerate(table_data):
+        current_x = x
+        
+        for col_idx in range(num_cols):
+            cell_text = row[col_idx] if col_idx < len(row) else ""
+            
+            # Стили для заголовка (цвета и рамки)
+            if row_idx == 0:
+                c.setFillColor(colors.HexColor('#4472C4'))  # Синий
+                c.rect(current_x, current_y - cell_height, cell_width, cell_height, fill=1, stroke=1)
+                c.setFillColor(colors.white)
+            else:
+                c.setFillColor(colors.white)
+                c.rect(current_x, current_y - cell_height, cell_width, cell_height, fill=0, stroke=1)
+                c.setFillColor(colors.black)
+            
+            # Обрезаем текст если слишком длинный
+            max_chars = int(cell_width / (0.3 * cm))
+            if len(cell_text) > max_chars:
+                cell_text = cell_text[:max_chars-3] + "..."
+            
+            # Используем Paragraph с TTF-шрифтом для поддержки Unicode/кириллицы
+            styles = getSampleStyleSheet()
+            if row_idx == 0:
+                cell_style = ParagraphStyle(
+                    'TableHeader',
+                    parent=styles['Normal'],
+                    fontSize=12,
+                    fontName=_register_fonts.bold_font,  # Используем зарегистрированный TTF-шрифт
+                    leading=14,
+                    alignment=1,  # Центрирование
+                )
+            else:
+                cell_style = ParagraphStyle(
+                    'TableCell',
+                    parent=styles['Normal'],
+                    fontSize=11,
+                    fontName=_register_fonts.regular_font,  # Используем зарегистрированный TTF-шрифт
+                    leading=13,
+                    alignment=1,  # Центрирование
+                )
+            
+            # Экранируем HTML-специальные символы
+            cell_text_escaped = cell_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            cell_para = Paragraph(cell_text_escaped, cell_style)
+            cell_para.wrapOn(c, cell_width, cell_height)
+            
+            # Рисуем по центру ячейки
+            text_x = current_x
+            text_y = current_y - cell_height / 2 - cell_para.height / 2
+            
+            cell_para.drawOn(c, text_x, text_y)
+            
+            current_x += cell_width
+        
+        current_y -= cell_height
+        
+        if current_y < 4 * cm:
+            break
+
+
+def _draw_chart(c: canvas.Canvas, content: str, x: float, y: float, width: float, max_height: float):
+    """Рисует данные графика на PDF (пока как структурированный список)"""
+    if not content or not content.strip():
+        return
+    
+    # Парсим данные графика
+    lines = [line.strip() for line in content.split('\n') if line.strip() and ':' in line]
+    
+    if not lines:
+        _draw_text_content(c, content, x, y, width, max_height)
+        return
+    
+    # Форматируем как список
+    formatted_lines = []
+    for line in lines:
+        parts = line.split(':', 1)
+        if len(parts) == 2:
+            name = parts[0].strip()
+            value = parts[1].strip()
+            formatted_lines.append(f"{name}: {value}")
+    
+    formatted_content = "\n".join(formatted_lines)
+    _draw_text_content(c, formatted_content, x, y, width, max_height)
