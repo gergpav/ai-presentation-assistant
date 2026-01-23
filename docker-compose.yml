@@ -42,11 +42,21 @@ services:
       TEMPERATURE: ${TEMPERATURE:-0.3}
       USE_QUANTIZATION: ${USE_QUANTIZATION:-false}
       PORT: 8001
+      # Таймаут генерации контента (в секундах, по умолчанию 10 минут)
+      LLM_GENERATION_TIMEOUT_SEC: ${LLM_GENERATION_TIMEOUT_SEC:-600}
       # Настройки HuggingFace Hub для надежной загрузки моделей
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       HF_HUB_DOWNLOAD_TIMEOUT: "600"
       REQUESTS_TIMEOUT: "600"
+      # Настройки GPU/CUDA
+      FORCE_CPU: ${FORCE_CPU:-false}
+      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-runwayml/stable-diffusion-v1-5}
+      STABLE_DIFFUSION_DEVICE: ${STABLE_DIFFUSION_DEVICE:-cuda}
+      STABLE_DIFFUSION_STEPS: ${STABLE_DIFFUSION_STEPS:-30}
+      STABLE_DIFFUSION_GUIDANCE_SCALE: ${STABLE_DIFFUSION_GUIDANCE_SCALE:-7.5}
+      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-512}
+      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-512}
     ports:
       - "${APP_PORT:-8001}:8001"  # Backend API
       - "${FRONTEND_PORT:-80}:80"  # Frontend (nginx)
@@ -61,14 +71,14 @@ services:
     networks:
       - ai-presentation-network
     restart: unless-stopped
-    # Для GPU поддержки (раскомментируйте при необходимости)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    # GPU поддержка для использования CUDA
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # Worker для фоновых задач
   worker:
@@ -88,11 +98,21 @@ services:
       TEMPERATURE: ${TEMPERATURE:-0.3}
       USE_QUANTIZATION: ${USE_QUANTIZATION:-false}
       RUN_WORKER: "true"
+      # Таймаут генерации контента (в секундах, по умолчанию 10 минут)
+      LLM_GENERATION_TIMEOUT_SEC: ${LLM_GENERATION_TIMEOUT_SEC:-600}
       # Настройки HuggingFace Hub для надежной загрузки моделей
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
       HF_HUB_DOWNLOAD_TIMEOUT: "600"
       REQUESTS_TIMEOUT: "600"
+      # Настройки GPU/CUDA
+      FORCE_CPU: ${FORCE_CPU:-false}
+      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-runwayml/stable-diffusion-v1-5}
+      STABLE_DIFFUSION_DEVICE: ${STABLE_DIFFUSION_DEVICE:-cuda}
+      STABLE_DIFFUSION_STEPS: ${STABLE_DIFFUSION_STEPS:-30}
+      STABLE_DIFFUSION_GUIDANCE_SCALE: ${STABLE_DIFFUSION_GUIDANCE_SCALE:-7.5}
+      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-512}
+      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-512}
     volumes:
       - ./storage:/app/storage
     depends_on:
@@ -102,14 +122,14 @@ services:
     networks:
       - ai-presentation-network
     restart: unless-stopped
-    # Для GPU поддержки (раскомментируйте при необходимости)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    # GPU поддержка для использования CUDA
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   postgres_data:

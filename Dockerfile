@@ -34,6 +34,8 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     nginx \
     git \
+    fonts-dejavu \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Рабочая директория
@@ -43,7 +45,12 @@ WORKDIR /app
 COPY requirements.txt .
 # Обновляем pip перед установкой зависимостей
 RUN pip install --upgrade pip setuptools wheel
-# Устанавливаем зависимости с --upgrade для обновления хешей зависимостей
+
+# Установка PyTorch с CUDA поддержкой (для GPU)
+# Используем CUDA 12.1, который совместим с CUDA Toolkit 13.0
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# Устанавливаем остальные зависимости (torch уже установлен, поэтому будет пропущен)
 # Это решает проблему с несовпадающими хешами пакетов (например, hf-xet)
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
