@@ -314,6 +314,8 @@ class ContentGenerator:
         user_prompt: str,
         context: str,
         audience: str = "инвесторы",
+        visual_type: str = "text",
+        max_chars: int = 800,
     ) -> Dict[str, Any]:
         """
         Генерация содержимого ОДНОГО слайда по пользовательскому промпту,
@@ -330,16 +332,38 @@ class ContentGenerator:
         # Инструкция по аудитории
         audience_instr = self.audience_instructions(audience)
 
+        # Определяем тип макета на основе промпта
+        layout_type = self._determine_layout(user_prompt, visual_type)
+        
+        # Для титульного слайда не генерируем контент
+        if layout_type == "title":
+            return {
+                "content": "", 
+                "audience": audience, 
+                "status": "success",
+                "layout": layout_type,
+                "visual_type": visual_type
+            }
+        
+        # Формируем инструкции для генерации в зависимости от типа визуализации
+        visual_instructions = self._get_visual_instructions(visual_type, user_prompt)
+        
+        # Формируем инструкции по ограничению символов
+        char_limit_instruction = f"\n\nВАЖНО: Общий объем текста должен быть не более {max_chars} символов. Текст должен быть законченным, предложения не должны обрываться. Если достигнут лимит символов, заверши текущее предложение и закончи генерацию."
+
+        # Инструкции по разделению заголовка и контента
+        title_instruction = "\n\nВАЖНО: НЕ включай заголовок слайда в сгенерированный контент. Генерируй ТОЛЬКО содержимое слайда (текст, таблицу, данные для графика и т.д.), без заголовка."
+
         # Формируем чат-сообщения: system описывает роль и формат, user содержит
         # сам запрос пользователя и контекст из документов (обрезаем до 800 символов)
         messages = [
             {
                 "role": "system",
-                "content": f"Ты – эксперт по презентациям. {audience_instr}\n\nВажно: генерируй развернутый контент для слайда - минимум 5-7 информативных пунктов. Каждый пункт должен быть содержательным и полезным.",
+                "content": f"Ты – эксперт по презентациям. {audience_instr}\n\n{visual_instructions}{char_limit_instruction}{title_instruction}\n\nВажно: НЕ используй markdown форматирование (**жирный**, *курсив*). Используй только обычный текст. Для выделения важных моментов используй заглавные буквы или структурируй текст списками.",
             },
             {
                 "role": "user",
-                "content": f"{user_prompt.strip()}\n\nКонтекст:\n{context[:800]}\n\nСгенерируй подробное содержимое слайда с 5-7 информативными пунктами.",
+                "content": f"{user_prompt.strip()}\n\nКонтекст:\n{context[:800]}\n\nСгенерируй содержимое слайда согласно требованиям выше. НЕ включай заголовок в ответ.",
             },
         ]
 
@@ -441,52 +465,241 @@ class ContentGenerator:
         gen_ids = out_ids[:, model_inputs["input_ids"].shape[1]:]
         content = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)[0].strip()
 
-        # Приводим ответ к аккуратному виду: оставляем 5-8 маркерованных строк
-        content = self._clean_content(content, slide_type="custom")
+        # Приводим ответ к аккуратному виду с учетом типа визуализации и макета
+        content = self._clean_content(content, layout_type=layout_type, visual_type=visual_type, max_chars=max_chars)
 
-        return {"content": content, "audience": audience, "status": "success"}
+        return {
+            "content": content, 
+            "audience": audience, 
+            "status": "success",
+            "layout": layout_type,
+            "visual_type": visual_type
+        }
+
+    # -------- определение макета слайда --------
+    
+    @staticmethod
+    def _determine_layout(prompt: str, visual_type: str) -> str:
+        """
+        Определяет тип макета слайда на основе промпта и типа визуализации.
+        Работает автоматически, не требуя явного указания типа слайда в промпте.
+        
+        Возвращает: "title", "two_content", "title_only", "title_and_content"
+        """
+        prompt_lower = prompt.lower().strip()
+        words = prompt_lower.split()
+        
+        # Титульный слайд - если промпт очень короткий и содержит ключевые слова
+        title_keywords = ["титульный", "титул", "обложка", "cover", "title slide", "начало", "название проекта"]
+        if any(kw in prompt_lower for kw in title_keywords) and len(words) <= 10:
+            return "title"
+        
+        # Сравнение - если есть слова сравнения ИЛИ упоминаются два объекта для сравнения
+        comparison_keywords = ["сравнение", "сравни", "против", "versus", "vs", "разница", "отличия", 
+                              "преимущества и недостатки", "плюсы и минусы", "за и против"]
+        comparison_patterns = ["против", "vs", "versus", "или", "либо"]
+        
+        # Проверяем наличие ключевых слов сравнения
+        if any(kw in prompt_lower for kw in comparison_keywords):
+            return "two_content"
+        
+        # Проверяем паттерны сравнения (два объекта через "против", "vs" и т.д.)
+        for pattern in comparison_patterns:
+            if pattern in prompt_lower:
+                # Проверяем, что есть два объекта для сравнения
+                parts = prompt_lower.split(pattern)
+                if len(parts) >= 2:
+                    # Если обе части содержат существительные/объекты
+                    if len(parts[0].split()) >= 2 and len(parts[1].split()) >= 2:
+                        return "two_content"
+        
+        # Только заголовок - если промпт очень короткий (1-3 слова) ИЛИ явно указано "без текста"
+        no_content_keywords = ["без текста", "только название", "только заголовок", "title only", "без контента"]
+        if any(kw in prompt_lower for kw in no_content_keywords):
+            return "title_only"
+        
+        # Если промпт очень короткий (1-3 слова) и это не титульный слайд
+        if len(words) <= 3 and visual_type == "text":
+            # Проверяем, не является ли это просто названием
+            if not any(word in ["создай", "сделай", "покажи", "опиши", "расскажи"] for word in words):
+                return "title_only"
+        
+        # По умолчанию - заголовок и контент
+        return "title_and_content"
+    
+    @staticmethod
+    def _get_visual_instructions(visual_type: str, prompt: str) -> str:
+        """
+        Возвращает инструкции для генерации в зависимости от типа визуализации.
+        """
+        prompt_lower = prompt.lower()
+        
+        if visual_type == "table":
+            return "Тип визуализации: ТАБЛИЦА. Сгенерируй данные ТОЛЬКО в формате таблицы с разделителем |. Используй СТРОГО такой формат:\nСтолбец1 | Столбец2 | Столбец3\nЗначение1 | Значение2 | Значение3\nЗначение2.1 | Значение2.2 | Значение2.3\n...\n\nКРИТИЧНО ВАЖНО: Каждая строка должна содержать разделитель | между значениями. НЕ добавляй никакого текста до или после таблицы. Только строки таблицы с разделителями |."
+        
+        elif visual_type == "chart":
+            if "график" in prompt_lower or "chart" in prompt_lower or "graph" in prompt_lower:
+                return "Тип визуализации: ГРАФИК. Сгенерируй данные ТОЛЬКО в формате:\nНазвание показателя: Числовое значение\nНазвание показателя 2: Числовое значение\n...\n\nКРИТИЧНО ВАЖНО: Каждая строка должна содержать название показателя, двоеточие и числовое значение. Значения должны быть числами (можно с десятичными точками). НЕ добавляй никакого текста до или после данных графика."
+            else:
+                return "Тип визуализации: ГРАФИК. Сгенерируй данные для графика СТРОГО в формате:\nНазвание показателя: Числовое значение\nНазвание показателя 2: Числовое значение\n...\n\nКРИТИЧНО ВАЖНО: Только данные в формате 'Название: Число', без дополнительного текста."
+        
+        elif visual_type == "image":
+            if "изображение" in prompt_lower or "image" in prompt_lower or "картинка" in prompt_lower:
+                return "Тип визуализации: ИЗОБРАЖЕНИЕ. Сгенерируй описание изображения, которое должно быть создано. Опиши, что должно быть на изображении, какие элементы, цвета, стиль."
+            else:
+                return "Тип визуализации: ИЗОБРАЖЕНИЕ. Сгенерируй изображение. Опиши детали изображения, которое должно быть создано."
+        
+        else:  # text
+            return "Тип визуализации: ТЕКСТ. Сгенерируй текстовое содержимое слайда в виде структурированного списка пунктов."
 
     # -------- очистка текста --------
 
     @staticmethod
-    def _clean_content(text: str, slide_type: str) -> str:
+    def _clean_content(text: str, layout_type: str = "title_and_content", visual_type: str = "text", max_chars: int = 800) -> str:
         """
-        Приводим ответ модели к аккуратному виду:
-        - для title: короткий заголовок,
-        - для остальных: 5-8 маркерованных пунктов для более полного контента.
+        Приводим ответ модели к аккуратному виду с учетом:
+        - типа макета (title, title_only, two_content, title_and_content)
+        - типа визуализации (text, table, chart, image)
+        - ограничения по символам (max_chars)
+        - убираем markdown форматирование (**жирный**, *курсив*)
         """
-        if slide_type == "title":
+        # Убираем markdown форматирование
+        text = text.replace("**", "").replace("*", "").replace("__", "").replace("_", "")
+        
+        if layout_type == "title":
             first_line = text.split('\n')[0].strip()
             first_line = first_line.replace('"', '').replace("'", "")
             words = first_line.split()[:6]
             return ' '.join(words)
-        else:
+        
+        if layout_type == "title_only":
+            return ""  # Пустой контент для слайда только с заголовком
+        
+        # Обработка таблиц
+        if visual_type == "table":
             lines = []
             for line in text.split('\n'):
                 line = line.strip()
-
+                if not line or len(line) < 3:
+                    continue
+                # Убираем markdown и лишние символы
+                clean_line = line.replace("|", " | ").strip()
+                if clean_line:
+                    lines.append(clean_line)
+            
+            result = "\n".join(lines)
+            # Обрезаем до лимита символов, но стараемся закончить строку
+            if len(result) > max_chars:
+                truncated = result[:max_chars]
+                # Пытаемся найти последнюю полную строку
+                last_newline = truncated.rfind('\n')
+                if last_newline > max_chars * 0.7:  # Если нашли новую строку не слишком рано
+                    result = truncated[:last_newline]
+                else:
+                    # Ищем последнее место, где можно закончить предложение
+                    for end_char in ['.', ';', ',']:
+                        last_end = truncated.rfind(end_char)
+                        if last_end > max_chars * 0.7:
+                            result = truncated[:last_end + 1]
+                            break
+                    else:
+                        result = truncated
+            return result
+        
+        # Обработка графиков
+        if visual_type == "chart":
+            lines = []
+            for line in text.split('\n'):
+                line = line.strip()
                 if not line:
                     continue
-
-                # убираем возможный префикс вроде "• " или "- "
-                if line.startswith("•") or line.startswith("-"):
-                    clean_line = line[1:].strip()
+                # Ищем формат "Название: Значение"
+                if ':' in line:
+                    clean_line = line.split(':')[0].strip() + ': ' + ':'.join(line.split(':')[1:]).strip()
+                    if clean_line:
+                        lines.append(clean_line)
+            
+            result = "\n".join(lines)
+            if len(result) > max_chars:
+                truncated = result[:max_chars]
+                last_newline = truncated.rfind('\n')
+                if last_newline > max_chars * 0.7:
+                    result = truncated[:last_newline]
                 else:
-                    clean_line = line
+                    result = truncated
+            return result
+        
+        # Обработка изображений
+        if visual_type == "image":
+            # Для изображений возвращаем описание
+            result = text.strip()
+            if len(result) > max_chars:
+                truncated = result[:max_chars]
+                # Пытаемся закончить предложение
+                for end_char in ['.', '!', '?']:
+                    last_end = truncated.rfind(end_char)
+                    if last_end > max_chars * 0.7:
+                        result = truncated[:last_end + 1]
+                        break
+                else:
+                    result = truncated
+            return result
+        
+        # Обработка текста (по умолчанию)
+        lines = []
+        current_length = 0
+        
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
 
-                # фильтр по длине, чтобы не тащить мусор
-                if len(clean_line) > 10:
-                    if len(clean_line) <= 200:  # увеличен лимит длины для более развернутых пунктов
-                        lines.append(f"• {clean_line}")
+            # убираем возможный префикс вроде "• " или "- "
+            if line.startswith("•") or line.startswith("-"):
+                clean_line = line[1:].strip()
+            else:
+                clean_line = line
 
-                # Увеличено до 8 пунктов для более полного контента
+            # фильтр по длине
+            if len(clean_line) > 10 and len(clean_line) <= 200:
+                # Проверяем, не превысим ли лимит символов
+                line_with_bullet = f"• {clean_line}\n"
+                if current_length + len(line_with_bullet) > max_chars:
+                    # Пытаемся закончить текущую строку
+                    remaining = max_chars - current_length - 3  # -3 для "• \n"
+                    if remaining > 20:  # Если осталось достаточно места
+                        # Обрезаем строку и пытаемся закончить предложение
+                        truncated_line = clean_line[:remaining]
+                        for end_char in ['.', ';', ',']:
+                            last_end = truncated_line.rfind(end_char)
+                            if last_end > remaining * 0.7:
+                                lines.append(f"• {truncated_line[:last_end + 1]}")
+                                break
+                        else:
+                            lines.append(f"• {truncated_line}")
+                    break
+                
+                lines.append(f"• {clean_line}")
+                current_length += len(line_with_bullet)
+                
+                # Ограничение по количеству пунктов
                 if len(lines) >= 8:
                     break
 
-            if not lines:
-                return "• Информация готовится\n• Данные анализируются\n• Результаты будут представлены"
+        if not lines:
+            return "• Информация готовится\n• Данные анализируются\n• Результаты будут представлены"
 
-            return "\n".join(lines)
+        result = "\n".join(lines)
+        # Финальная проверка лимита символов
+        if len(result) > max_chars:
+            truncated = result[:max_chars]
+            last_newline = truncated.rfind('\n')
+            if last_newline > max_chars * 0.7:
+                result = truncated[:last_newline]
+            else:
+                result = truncated
+        
+        return result
 
     def health_check(self) -> Dict[str, Any]:
         # Для health_check не загружаем модель принудительно, чтобы не вызывать OOM
