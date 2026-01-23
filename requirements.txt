@@ -84,3 +84,5 @@ alembic==1.14.0
 bitsandbytes>=0.41.0
 psycopg2-binary>=2.9.0
 kernels>=0.11.1
+# Для локальной генерации изображений через Stable Diffusion
+diffusers>=0.21.0
