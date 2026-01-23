@@ -127,7 +127,7 @@ export function SlideList({
                       Генерация...
                     </span>
                   )}
-                  {slide.generatedContent && !slide.isGenerating && (
+                  {slide.status === 'completed' && !slide.isGenerating && (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-green-100 rounded text-xs text-green-600">
                       ✓ Готов
                     </span>
