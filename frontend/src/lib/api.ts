@@ -33,6 +33,7 @@ export interface SlideOut {
   prompt: string | null;
   documents: SlideDocumentOut[];
   generatedContent: string | null;
+  generatedImageUrl?: string | null;
   isGenerating: boolean;
   visualType: 'text' | 'chart' | 'table' | 'image';
   status: 'pending' | 'completed' | 'failed';
@@ -347,6 +348,26 @@ class ApiClient {
   // Download endpoint
   async downloadFile(fileId: number): Promise<Blob> {
     const url = `${this.baseUrl}/files/${fileId}/download`;
+    const headers: HeadersInit = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(url, {
+      headers,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: response.statusText }));
+      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+    }
+
+    return response.blob();
+  }
+
+  // Slide image endpoint (authorized)
+  async getSlideImage(slideId: number): Promise<Blob> {
+    const url = `${this.baseUrl}/slides/${slideId}/image/latest`;
     const headers: HeadersInit = {};
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
