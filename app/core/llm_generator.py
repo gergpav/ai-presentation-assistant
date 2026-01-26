@@ -1,11 +1,11 @@
 # app/core/llm_generator.py
 import os
 
-# Убеждаемся, что CUDA отключена ДО импорта torch
+# Убеждаемся, что CUDA настроена правильно ДО импорта torch
 # (на случай если переменные не были установлены в main.py)
-force_cpu_env = os.getenv("FORCE_CPU", "true").lower() == "true"
+force_cpu_env = os.getenv("FORCE_CPU", "false").lower() == "true"  # По умолчанию false - используем GPU
 if force_cpu_env and "CUDA_VISIBLE_DEVICES" not in os.environ:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Отключаем GPU только если FORCE_CPU=true
 
 # Настройки HuggingFace Hub для надежной загрузки моделей
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -108,25 +108,28 @@ class ContentGenerator:
                         logger.error(f"❌ Не удалось загрузить токенайзер после {max_retries} попыток")
                         raise
 
-            # Принудительно используем CPU для sm_120 (RTX 5060 Ti) из-за несовместимости
-            # Можно включить GPU через переменную окружения FORCE_CPU=false когда появится поддержка
+            # Определяем, использовать ли GPU (по умолчанию используем GPU если доступен)
+            force_cpu = os.getenv("FORCE_CPU", "false").lower() == "true"  # По умолчанию false - используем GPU
             use_cuda = False
-            force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
             
             if not force_cpu and torch.cuda.is_available():
                 try:
                     device_capability = torch.cuda.get_device_capability(0)
-                    # sm_120 (12.0) пока не поддерживается - используем CPU
-                    if device_capability[0] < 12:
-                        use_cuda = True
-                        logger.info(f"Используем GPU с compute capability {device_capability}")
-                    else:
-                        logger.warning(f"GPU compute capability {device_capability} не поддерживается, используем CPU")
+                    device_name = torch.cuda.get_device_name(0)
+                    # Поддерживаем все версии CUDA capability (включая sm_120 для RTX 50xx)
+                    use_cuda = True
+                    logger.info(f"✅ Используем GPU {device_name} с compute capability {device_capability[0]}.{device_capability[1]}")
                 except Exception as e:
                     logger.warning(f"Ошибка проверки CUDA: {e}, используем CPU")
+                    use_cuda = False
+            else:
+                if force_cpu:
+                    logger.info("FORCE_CPU=true, используем CPU для генерации")
+                elif not torch.cuda.is_available():
+                    logger.info("CUDA недоступна, используем CPU для генерации")
             
             if not use_cuda:
-                logger.info("Используем CPU для генерации (GPU отключен или несовместим)")
+                logger.info("Используем CPU для генерации")
             
             # Проверяем, нужно ли использовать квантование для CPU
             use_quantization = settings.USE_QUANTIZATION and not use_cuda
@@ -335,18 +338,102 @@ class ContentGenerator:
         # Определяем тип макета на основе промпта
         layout_type = self._determine_layout(user_prompt, visual_type)
         
-        # Для титульного слайда не генерируем контент
+        # Для титульного слайда генерируем заголовок и подзаголовок из промпта
         if layout_type == "title":
+            # Генерируем заголовок и подзаголовок для титульного слайда
+            title_instruction = "Ты – эксперт по презентациям. Сгенерируй заголовок и подзаголовок для титульного слайда презентации.\n\nФормат ответа:\nЗАГОЛОВОК: [название презентации или проекта]\nПОДЗАГОЛОВОК: [дополнительная информация: автор, дата, организация и т.д.]\n\nВАЖНО: Используй информацию из промпта пользователя. Если в промпте указан только заголовок, подзаголовок можно не указывать (оставь пустым)."
+            
+            messages_title = [
+                {
+                    "role": "system",
+                    "content": title_instruction,
+                },
+                {
+                    "role": "user",
+                    "content": f"{user_prompt.strip()}\n\nСгенерируй заголовок и подзаголовок для титульного слайда.",
+                },
+            ]
+            
+            # Применяем chat template
+            if hasattr(self.tokenizer, "apply_chat_template"):
+                text_title = self.tokenizer.apply_chat_template(
+                    messages_title,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            else:
+                text_title = "\n\n".join([msg["content"] for msg in messages_title])
+            
+            # Генерируем заголовок и подзаголовок
+            model_inputs_title = self.tokenizer([text_title], return_tensors="pt")
+            try:
+                model_device = next(self.model.parameters()).device
+                device_title = model_device
+                if force_cpu_env:
+                    device_title = torch.device('cpu')
+            except (StopIteration, AttributeError):
+                device_title = torch.device('cpu')
+            
+            model_inputs_title = {k: v.to(device_title) for k, v in model_inputs_title.items()}
+            eos_id = self.tokenizer.eos_token_id
+            pad_id = self.tokenizer.pad_token_id or eos_id
+            
+            with torch.inference_mode():
+                out_ids_title = self.model.generate(
+                    **model_inputs_title,
+                    max_new_tokens=min(settings.MAX_NEW_TOKENS, 100),  # Ограничиваем для титульного слайда
+                    do_sample=False,
+                    eos_token_id=eos_id,
+                    pad_token_id=pad_id,
+                )
+            
+            gen_ids_title = out_ids_title[:, model_inputs_title["input_ids"].shape[1]:]
+            title_content = self.tokenizer.batch_decode(gen_ids_title, skip_special_tokens=True)[0].strip()
+            
+            # Парсим заголовок и подзаголовок
+            title_lines = [line.strip() for line in title_content.split('\n') if line.strip()]
+            title_text = ""
+            subtitle_text = ""
+            
+            for line in title_lines:
+                if line.startswith("ЗАГОЛОВОК:") or line.startswith("Заголовок:"):
+                    title_text = line.split(":", 1)[1].strip() if ":" in line else line
+                elif line.startswith("ПОДЗАГОЛОВОК:") or line.startswith("Подзаголовок:"):
+                    subtitle_text = line.split(":", 1)[1].strip() if ":" in line else line
+                elif not title_text:
+                    title_text = line
+                elif not subtitle_text:
+                    subtitle_text = line
+            
+            # Если не нашли структурированный формат, используем первую строку как заголовок
+            if not title_text and title_lines:
+                title_text = title_lines[0]
+                if len(title_lines) > 1:
+                    subtitle_text = title_lines[1]
+            
+            # Формируем контент для титульного слайда
+            title_content_result = f"ЗАГОЛОВОК: {title_text}"
+            if subtitle_text:
+                title_content_result += f"\nПОДЗАГОЛОВОК: {subtitle_text}"
+            
             return {
-                "content": "", 
-                "audience": audience, 
+                "content": title_content_result,
+                "audience": audience,
                 "status": "success",
                 "layout": layout_type,
-                "visual_type": visual_type
+                "visual_type": visual_type,
+                "title": title_text,
+                "subtitle": subtitle_text
             }
         
         # Формируем инструкции для генерации в зависимости от типа визуализации
-        visual_instructions = self._get_visual_instructions(visual_type, user_prompt)
+        # Нормализуем visual_type: если это enum или объект, берем строковое значение
+        visual_type_str = visual_type.value if hasattr(visual_type, 'value') else str(visual_type)
+        visual_instructions = self._get_visual_instructions(visual_type_str, user_prompt)
+        
+        # Логируем тип визуализации для отладки
+        logger.info(f"Генерация контента для типа визуализации: {visual_type_str}")
+        logger.debug(f"Инструкции для визуализации: {visual_instructions[:200]}...")
         
         # Формируем инструкции по ограничению символов
         char_limit_instruction = f"\n\nВАЖНО: Общий объем текста должен быть не более {max_chars} символов. Текст должен быть законченным, предложения не должны обрываться. Если достигнут лимит символов, заверши текущее предложение и закончи генерацию."
@@ -355,7 +442,9 @@ class ContentGenerator:
         title_instruction = "\n\nВАЖНО: НЕ включай заголовок слайда в сгенерированный контент. Генерируй ТОЛЬКО содержимое слайда (текст, таблицу, данные для графика и т.д.), без заголовка."
 
         # Формируем чат-сообщения: system описывает роль и формат, user содержит
-        # сам запрос пользователя и контекст из документов (обрезаем до 800 символов)
+        # сам запрос пользователя и контекст из документов (обрезаем до 600 символов для ускорения)
+        # Уменьшаем длину контекста для более быстрой генерации
+        context_trimmed = context[:600] if context else ""
         messages = [
             {
                 "role": "system",
@@ -363,7 +452,7 @@ class ContentGenerator:
             },
             {
                 "role": "user",
-                "content": f"{user_prompt.strip()}\n\nКонтекст:\n{context[:800]}\n\nСгенерируй содержимое слайда согласно требованиям выше. НЕ включай заголовок в ответ.",
+                "content": f"{user_prompt.strip()}\n\nКонтекст:\n{context_trimmed}\n\nСгенерируй содержимое слайда согласно требованиям выше. НЕ включай заголовок в ответ.",
             },
         ]
 
@@ -381,81 +470,76 @@ class ContentGenerator:
 
         # Токенизируем текст и переносим входные тензоры на устройство модели
         model_inputs = self.tokenizer([text], return_tensors="pt")
-        # Принудительно используем CPU для избежания CUDA ошибок
-        device = torch.device('cpu')
-        # Убеждаемся, что модель на CPU
+        
+        # Определяем устройство модели (GPU если доступен и не принудительно CPU)
         try:
             model_device = next(self.model.parameters()).device
-            if model_device.type != 'cpu':
-                logger.warning(f"Модель на устройстве {model_device}, перемещаем на CPU")
-                self.model = self.model.to(torch.device('cpu'))
+            device = model_device
+            # Если принудительно CPU, перемещаем на CPU
+            if force_cpu_env:
+                device = torch.device('cpu')
+                if model_device.type != 'cpu':
+                    logger.info(f"Перемещаем модель с {model_device} на CPU (FORCE_CPU=true)")
+                    self.model = self.model.to(device)
+            else:
+                # Используем устройство модели (скорее всего GPU)
+                device = model_device
+                logger.debug(f"Используем устройство модели: {device}")
         except (StopIteration, AttributeError):
-            pass
-        # Перемещаем входные тензоры на CPU
+            # Fallback на CPU если не удалось определить устройство
+            device = torch.device('cpu')
+        
+        # Перемещаем входные тензоры на то же устройство, что и модель
         model_inputs = {k: v.to(device) for k, v in model_inputs.items()}
 
         eos_id = self.tokenizer.eos_token_id
         pad_id = self.tokenizer.pad_token_id or eos_id
 
-        # Дополнительная проверка: убеждаемся, что модель не на CUDA
-        try:
-            if torch.cuda.is_available():
-                # Если CUDA доступна, но мы хотим использовать CPU
-                if force_cpu_env:
-                    # Явно перемещаем модель на CPU еще раз
-                    self.model = self.model.to(torch.device("cpu"))
-                    logger.debug("Модель явно перемещена на CPU перед генерацией")
-        except Exception as e:
-            logger.warning(f"Ошибка при проверке устройства модели: {e}")
-
         # Генерируем текст, ограничивая длину settings.MAX_NEW_TOKENS
-        # Используем inference_mode для оптимизации на CPU и более быструю генерацию
+        # Используем inference_mode для оптимизации и более быструю генерацию
         import time
         start_time = time.time()
-        logger.info(f"Начинаем генерацию с max_new_tokens={settings.MAX_NEW_TOKENS}")
+        logger.info(f"Начинаем генерацию с max_new_tokens={settings.MAX_NEW_TOKENS} на устройстве {device}")
+        
+        # Оптимизации для GPU
+        generation_kwargs = {
+            **model_inputs,
+            "max_new_tokens": settings.MAX_NEW_TOKENS,
+            "do_sample": False,  # Greedy decoding для скорости
+            "num_beams": 1,  # Одиночный beam для максимальной скорости
+            "eos_token_id": eos_id,
+            "pad_token_id": pad_id,
+            "use_cache": True,  # KV cache для ускорения
+            "output_attentions": False,
+            "output_hidden_states": False,
+            "repetition_penalty": 1.1,
+        }
+        
+        # Для GPU добавляем дополнительные оптимизации
+        if device.type == 'cuda':
+            # Используем torch.inference_mode для GPU (быстрее чем no_grad)
+            generation_kwargs["temperature"] = None  # Отключаем temperature для greedy
+            logger.debug("Используем GPU оптимизации для генерации")
         
         try:
-            # Используем torch.inference_mode() для ускорения на CPU
-            # Дополнительно отключаем градиенты глобально для CPU
+            # Используем torch.inference_mode() для ускорения (работает и на CPU и на GPU)
             with torch.inference_mode():
-                with torch.no_grad():  # Двойная защита от градиентов
-                    out_ids = self.model.generate(
-                        **model_inputs,
-                        max_new_tokens=settings.MAX_NEW_TOKENS,
-                        do_sample=False,
-                        num_beams=1,  # Одиночный beam для ускорения (greedy decoding)
-                        eos_token_id=eos_id,
-                        pad_token_id=pad_id,
-                        use_cache=True,
-                        # Оптимизации для CPU
-                        output_attentions=False,
-                        output_hidden_states=False,
-                        # Дополнительные оптимизации
-                        repetition_penalty=1.1,  # Небольшой penalty для избежания повторений и более разнообразной генерации
-                    )
+                out_ids = self.model.generate(**generation_kwargs)
             
             elapsed = time.time() - start_time
             logger.info(f"Генерация завершена за {elapsed:.2f} секунд, сгенерировано токенов: {out_ids.shape[1] - model_inputs['input_ids'].shape[1]}")
         except RuntimeError as e:
-            if "CUDA" in str(e) or "cuda" in str(e).lower():
-                # Если возникла CUDA ошибка, пробуем переместить модель на CPU и повторить
-                logger.error(f"Обнаружена CUDA ошибка: {e}. Принудительно перемещаем модель на CPU и повторяем...")
-                self.model = self.model.to(torch.device("cpu"))
-                model_inputs = {k: v.to(torch.device("cpu")) for k, v in model_inputs.items()}
+            if "CUDA" in str(e) or "cuda" in str(e).lower() or "out of memory" in str(e).lower():
+                # Если возникла CUDA ошибка или OOM, пробуем переместить модель на CPU и повторить
+                logger.warning(f"Обнаружена CUDA ошибка: {e}. Перемещаем модель на CPU и повторяем...")
+                cpu_device = torch.device("cpu")
+                self.model = self.model.to(cpu_device)
+                model_inputs = {k: v.to(cpu_device) for k, v in model_inputs.items()}
+                generation_kwargs_cpu = {**generation_kwargs}
+                generation_kwargs_cpu.update(model_inputs)
+                generation_kwargs_cpu.pop("temperature", None)  # Убираем temperature для CPU
                 with torch.inference_mode():
-                    with torch.no_grad():
-                        out_ids = self.model.generate(
-                            **model_inputs,
-                            max_new_tokens=settings.MAX_NEW_TOKENS,
-                            do_sample=False,
-                            num_beams=1,
-                            eos_token_id=eos_id,
-                            pad_token_id=pad_id,
-                            use_cache=True,
-                            output_attentions=False,
-                            output_hidden_states=False,
-                            repetition_penalty=1.1,
-                        )
+                    out_ids = self.model.generate(**generation_kwargs_cpu)
                 elapsed = time.time() - start_time
                 logger.info(f"Генерация завершена после CUDA ошибки за {elapsed:.2f} секунд, сгенерировано токенов: {out_ids.shape[1] - model_inputs['input_ids'].shape[1]}")
             else:
@@ -535,19 +619,13 @@ class ContentGenerator:
         prompt_lower = prompt.lower()
         
         if visual_type == "table":
-            return "Тип визуализации: ТАБЛИЦА. Сгенерируй данные ТОЛЬКО в формате таблицы с разделителем |. Используй СТРОГО такой формат:\nСтолбец1 | Столбец2 | Столбец3\nЗначение1 | Значение2 | Значение3\nЗначение2.1 | Значение2.2 | Значение2.3\n...\n\nКРИТИЧНО ВАЖНО: Каждая строка должна содержать разделитель | между значениями. НЕ добавляй никакого текста до или после таблицы. Только строки таблицы с разделителями |."
+            return "Тип визуализации: ТАБЛИЦА. Сгенерируй данные ТОЛЬКО в формате таблицы с разделителем |. Используй СТРОГО такой формат:\nСтолбец1 | Столбец2 | Столбец3\nЗначение1 | Значение2 | Значение3\nЗначение2.1 | Значение2.2 | Значение2.3\n...\n\nКРИТИЧНО ВАЖНО:\n1. Каждая строка должна содержать разделитель | между значениями.\n2. Первая строка - это заголовки столбцов.\n3. Последующие строки - это данные.\n4. НЕ добавляй никакого текста до или после таблицы.\n5. НЕ используй markdown форматирование (``` или другие символы).\n6. Только строки таблицы с разделителями |, без дополнительного текста.\n7. Пример правильного формата:\nФинансовые показатели за последние 3 квартала | Значение\nВыручка | $500,000\nПрибыль | $150,000"
         
         elif visual_type == "chart":
-            if "график" in prompt_lower or "chart" in prompt_lower or "graph" in prompt_lower:
-                return "Тип визуализации: ГРАФИК. Сгенерируй данные ТОЛЬКО в формате:\nНазвание показателя: Числовое значение\nНазвание показателя 2: Числовое значение\n...\n\nКРИТИЧНО ВАЖНО: Каждая строка должна содержать название показателя, двоеточие и числовое значение. Значения должны быть числами (можно с десятичными точками). НЕ добавляй никакого текста до или после данных графика."
-            else:
-                return "Тип визуализации: ГРАФИК. Сгенерируй данные для графика СТРОГО в формате:\nНазвание показателя: Числовое значение\nНазвание показателя 2: Числовое значение\n...\n\nКРИТИЧНО ВАЖНО: Только данные в формате 'Название: Число', без дополнительного текста."
+            return "Тип визуализации: ГРАФИК. Сгенерируй данные ТОЛЬКО в формате:\nНазвание показателя: Числовое значение\nНазвание показателя 2: Числовое значение\n...\n\nКРИТИЧНО ВАЖНО:\n1. Каждая строка должна содержать название показателя, двоеточие и числовое значение.\n2. Значения должны быть числами (можно с десятичными точками, например: 150, 160.5, 175.25).\n3. НЕ добавляй никакого текста до или после данных графика.\n4. НЕ используй markdown форматирование или другие символы.\n5. Только данные в формате 'Название: Число', каждая строка на новой строке.\n6. Пример правильного формата:\nQ1 2024: 150\nQ2 2024: 160\nQ3 2024: 175\nQ4 2024: 190"
         
         elif visual_type == "image":
-            if "изображение" in prompt_lower or "image" in prompt_lower or "картинка" in prompt_lower:
-                return "Тип визуализации: ИЗОБРАЖЕНИЕ. Сгенерируй описание изображения, которое должно быть создано. Опиши, что должно быть на изображении, какие элементы, цвета, стиль."
-            else:
-                return "Тип визуализации: ИЗОБРАЖЕНИЕ. Сгенерируй изображение. Опиши детали изображения, которое должно быть создано."
+            return "Тип визуализации: ИЗОБРАЖЕНИЕ. Сгенерируй ТОЛЬКО описание изображения для генерации. Опиши детально, что должно быть на изображении: какие элементы, объекты, цвета, стиль, композиция.\n\nКРИТИЧНО ВАЖНО:\n1. НЕ добавляй никакого текста до или после описания.\n2. Только описание изображения на русском языке.\n3. Описание должно быть детальным и конкретным.\n4. Пример правильного формата:\nСхема технологического процесса производства с этапами: подготовка сырья, первичная обработка, вторичная обработка, упаковка, складирование. Стрелки показывают последовательность этапов. Стиль: схематичный, профессиональный, синие и зеленые цвета."
         
         else:  # text
             return "Тип визуализации: ТЕКСТ. Сгенерируй текстовое содержимое слайда в виде структурированного списка пунктов."
@@ -565,6 +643,41 @@ class ContentGenerator:
         """
         # Убираем markdown форматирование
         text = text.replace("**", "").replace("*", "").replace("__", "").replace("_", "")
+
+        # Убираем служебные параметры/шапки, которые иногда возвращает модель
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+        if lines:
+            meta_keywords = [
+                "контрольные параметры",
+                "объем текста",
+                "смешанная аудитория",
+                "баланс",
+                "тип визуализации",
+                "не использовать markdown",
+                "содержимое слайда",
+            ]
+            start_from_content = False
+            cleaned_lines = []
+            for line in lines:
+                line_lower = line.lower()
+                # Если нашли явную метку "Содержимое слайда", начинаем собирать после нее
+                if "содержимое слайда" in line_lower:
+                    start_from_content = True
+                    continue
+                if not start_from_content:
+                    # Пропускаем строки с мета-параметрами
+                    if any(keyword in line_lower for keyword in meta_keywords):
+                        continue
+                # Убираем возможные префиксы вроде "Содержимое слайда:"
+                cleaned_line = line
+                if cleaned_line.lower().startswith("содержимое слайда"):
+                    parts = cleaned_line.split(":", 1)
+                    cleaned_line = parts[1].strip() if len(parts) > 1 else ""
+                cleaned_line = cleaned_line.strip()
+                if cleaned_line:
+                    cleaned_lines.append(cleaned_line)
+            if cleaned_lines:
+                text = "\n".join(cleaned_lines)
         
         if layout_type == "title":
             first_line = text.split('\n')[0].strip()
