@@ -2,16 +2,25 @@
 # для предотвращения попыток использования CUDA
 import os
 
-# Принудительно отключаем CUDA (по умолчанию true для избежания ошибок)
-force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
+# Настройка CUDA (по умолчанию используем GPU если доступен)
+force_cpu = os.getenv("FORCE_CPU", "false").lower() == "true"  # По умолчанию false - используем GPU
 if force_cpu:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек только если FORCE_CPU=true
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Логируем настройку CUDA после импорта logger
+if force_cpu:
+    logger.info("FORCE_CPU=true, GPU отключен")
+else:
+    logger.info("Используем GPU если доступен (FORCE_CPU=false или не установлен)")
 from app.api.auth import router as auth_router
 from app.api.projects import router as projects_router
 from app.api.slides import router as slides_router
@@ -23,9 +32,6 @@ from app.api.download import router as download_router
 from app.api.templates import router as templates_router
 from app.core.embeddings import document_index, model
 from app.core.llm_generator import content_generator
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager

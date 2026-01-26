@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     LLM_MODEL: str = "Qwen/Qwen2.5-3B-Instruct"
-    MAX_NEW_TOKENS: int = 250
+    MAX_NEW_TOKENS: int = 200  # Уменьшено с 250 для ускорения генерации (слайд обычно 100-150 токенов)
     TEMPERATURE: float = 0.3
     # Использовать 8-bit квантование для моделей 7B+ на CPU
     # Уменьшает потребление памяти в 2 раза, скорость почти не страдает
@@ -24,12 +24,12 @@ class Settings(BaseSettings):
     WORKER_PARALLEL_JOBS: int = 3
 
     # Настройки локального Stable Diffusion для генерации изображений
-    # Модель для генерации (по умолчанию Stable Diffusion 1.5)
+    # Модель для генерации (по умолчанию SDXL 1.0 base)
     # Популярные модели: 
     #   - runwayml/stable-diffusion-v1-5 (быстрая, ~4GB VRAM)
     #   - stabilityai/stable-diffusion-2-1 (лучше качество, ~5GB VRAM)
     #   - stabilityai/stable-diffusion-xl-base-1.0 (лучшее качество, ~7GB VRAM)
-    STABLE_DIFFUSION_MODEL_ID: str = "runwayml/stable-diffusion-v1-5"
+    STABLE_DIFFUSION_MODEL_ID: str = "stabilityai/stable-diffusion-xl-base-1.0"
     # Устройство для генерации изображений: 'cuda' для GPU, 'cpu' для CPU, или None для автоопределения
     # ВАЖНО: Если FORCE_CPU=true, GPU будет недоступен даже при указании 'cuda'
     # Рекомендация: если у вас мало VRAM (<12GB), используйте GPU только для одной модели
@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     # Сила следования промпту (7.5 - стандартное значение)
     STABLE_DIFFUSION_GUIDANCE_SCALE: float = 7.5
     # Размер изображения (512x512 - стандарт для SD 1.5, 1024x1024 для SDXL)
-    STABLE_DIFFUSION_WIDTH: int = 512
-    STABLE_DIFFUSION_HEIGHT: int = 512
+    STABLE_DIFFUSION_WIDTH: int = 640
+    STABLE_DIFFUSION_HEIGHT: int = 640
 
     DATABASE_URL_ASYNC: str
     DATABASE_URL_SYNC: str
