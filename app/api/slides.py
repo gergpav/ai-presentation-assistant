@@ -1,5 +1,7 @@
 # app/api/slides.py
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func, delete, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -162,6 +164,42 @@ async def get_latest_slide_content(
         "content": content_text,
         "created_at": sc.created_at.isoformat() if sc.created_at else None,
     }
+
+
+@router.get("/slides/{slide_id}/image/latest")
+async def get_latest_slide_image(
+    slide_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Возвращает последнюю сгенерированную картинку для слайда.
+    """
+    slide = await _ensure_slide_owner(db, slide_id, user.id)
+
+    res = await db.execute(
+        select(SlideContent)
+        .where(SlideContent.slide_id == slide.id)
+        .order_by(desc(SlideContent.version))
+        .limit(1)
+    )
+    sc = res.scalar_one_or_none()
+    if not sc or not sc.llm_meta:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    image_path = sc.llm_meta.get("generated_image_path")
+    if not image_path:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    path = Path(image_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Image missing on disk")
+
+    return FileResponse(
+        path=str(path),
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.put("/slides/{slide_id}/content/latest")

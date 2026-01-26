@@ -1,5 +1,6 @@
 # app/api/projects.py
 from fastapi import APIRouter, Depends, HTTPException
+from pathlib import Path
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +63,7 @@ class SlideOut(BaseModel):
     prompt: str | None
     documents: list[SlideDocumentOut]
     generatedContent: str | None
+    generatedImageUrl: str | None = None
     isGenerating: bool
     visualType: Literal["text", "chart", "table", "image"]
     status: Literal["pending", "completed", "failed"]
@@ -171,12 +173,18 @@ async def get_project(
         )
         latest_content = content_res.scalar_one_or_none()
         generated_content = None
+        generated_image_url = None
         if latest_content and latest_content.content:
             # content это JSON, извлекаем текст если есть поле text
             if isinstance(latest_content.content, dict):
                 generated_content = latest_content.content.get("text", str(latest_content.content))
             else:
                 generated_content = str(latest_content.content)
+        if latest_content and latest_content.llm_meta:
+            image_path = latest_content.llm_meta.get("generated_image_path")
+            if image_path and Path(image_path).exists():
+                # Добавляем версию, чтобы фронтенд обновлял изображение при регенерации
+                generated_image_url = f"/api/slides/{slide.id}/image/latest?v={latest_content.version}"
 
         # Получаем документы слайда
         docs_res = await db.execute(
@@ -207,6 +215,7 @@ async def get_project(
                     for doc in documents
                 ],
                 generatedContent=generated_content,
+                generatedImageUrl=generated_image_url,
                 isGenerating=slide.status == SlideStatus.generating,
                 visualType=slide.visual_type.value,
                 status=status_mapping.get(slide.status, "pending"),
@@ -258,11 +267,17 @@ async def update_project(
         )
         latest_content = content_res.scalar_one_or_none()
         generated_content = None
+        generated_image_url = None
         if latest_content and latest_content.content:
             if isinstance(latest_content.content, dict):
                 generated_content = latest_content.content.get("text", str(latest_content.content))
             else:
                 generated_content = str(latest_content.content)
+        if latest_content and latest_content.llm_meta:
+            image_path = latest_content.llm_meta.get("generated_image_path")
+            if image_path and Path(image_path).exists():
+                # Добавляем версию, чтобы фронтенд обновлял изображение при регенерации
+                generated_image_url = f"/api/slides/{slide.id}/image/latest?v={latest_content.version}"
 
         docs_res = await db.execute(
             select(SlideDocument).where(SlideDocument.slide_id == slide.id).order_by(SlideDocument.id.asc())
@@ -291,6 +306,7 @@ async def update_project(
                     for doc in documents
                 ],
                 generatedContent=generated_content,
+                generatedImageUrl=generated_image_url,
                 isGenerating=slide.status == SlideStatus.generating,
                 visualType=slide.visual_type.value,
                 status=status_mapping.get(slide.status, "pending"),
