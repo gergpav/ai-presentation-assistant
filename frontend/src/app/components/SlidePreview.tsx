@@ -1,20 +1,95 @@
 import { Eye, Sparkles } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import type { Slide } from '../../lib/types';
+import { api } from '../../lib/api';
 
 interface SlidePreviewProps {
   slide: Slide;
 }
 
 export function SlidePreview({ slide }: SlidePreviewProps) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageError, setImageError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    let objectUrl: string | null = null;
+
+    const loadImage = async () => {
+      setImageError(null);
+      setImageUrl(null);
+      if (!slide.generatedImageUrl) {
+        return;
+      }
+      try {
+        const blob = await api.getSlideImage(slide.id);
+        objectUrl = URL.createObjectURL(blob);
+        if (isMounted) {
+          setImageUrl(objectUrl);
+        }
+      } catch (err: any) {
+        if (isMounted) {
+          setImageError(err?.message || 'Не удалось загрузить изображение');
+        }
+      }
+    };
+
+    loadImage();
+
+    return () => {
+      isMounted = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [slide.id, slide.generatedImageUrl]);
+
   const renderContent = () => {
-    if (!slide.generatedContent) {
+    if (!slide.generatedContent && !slide.generatedImageUrl) {
+      const emptyLabel =
+        slide.visualType === 'image' || slide.visualType === 'chart' || slide.visualType === 'table'
+          ? 'Визуализация не сгенерирована'
+          : 'Контент не сгенерирован';
       return (
         <div className="flex items-center justify-center h-full">
           <div className="text-center">
             <Sparkles className="w-12 h-12 text-gray-300 mx-auto mb-3" />
             <p className="text-sm text-gray-500">
-              Контент не сгенерирован
+              {emptyLabel}
             </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (slide.generatedImageUrl) {
+      if (imageError) {
+        return (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <p className="text-sm text-gray-500">{imageError}</p>
+            </div>
+          </div>
+        );
+      }
+      if (!imageUrl) {
+        return (
+          <div className="flex items-center justify-center h-full">
+            <div className="text-center">
+              <Sparkles className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">Загрузка изображения...</p>
+            </div>
+          </div>
+        );
+      }
+      return (
+        <div className="p-6">
+          <div className="bg-white rounded-lg p-4 border border-gray-200 flex items-center justify-center">
+            <img
+              src={imageUrl}
+              alt={slide.title}
+              className="max-w-full max-h-[320px] object-contain"
+            />
           </div>
         </div>
       );

@@ -19,6 +19,7 @@ export interface Slide {
   prompt: string;
   documents: SlideDocument[];
   generatedContent: string;
+  generatedImageUrl?: string;
   isGenerating: boolean;
   visualType: 'text' | 'chart' | 'table' | 'image';
   status: 'pending' | 'completed' | 'failed';
@@ -48,6 +49,7 @@ export function projectToPresentation(project: ProjectOut): Presentation {
         size: doc.size,
       })),
       generatedContent: slide.generatedContent || '',
+      generatedImageUrl: slide.generatedImageUrl || undefined,
       isGenerating: slide.isGenerating,
       visualType: slide.visualType,
       status: slide.status,
