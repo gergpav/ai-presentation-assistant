@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 STORAGE_DIR = Path("storage") / "images"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
+# Настройки HuggingFace Hub для стабильной загрузки моделей
+# Отключаем Xet/CAS и hf_transfer, т.к. они могут падать в Docker/проксированных сетях
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
+os.environ.setdefault("REQUESTS_TIMEOUT", "600")
+
 # Ленивая загрузка модели
 _pipeline = None
 _model_lock = asyncio.Lock()
@@ -83,16 +91,55 @@ class ImageGenerator:
                 logger.info("Это может занять несколько минут при первом запуске...")
                 
                 # Импортируем diffusers только при необходимости
-                from diffusers import StableDiffusionPipeline
+                # Для SDXL используем отдельный pipeline
+                model_id_lower = self.model_id.lower()
+                if "xl" in model_id_lower or "sdxl" in model_id_lower:
+                    from diffusers import StableDiffusionXLPipeline as PipelineClass
+                else:
+                    from diffusers import StableDiffusionPipeline as PipelineClass
+                # Авторизация в HuggingFace (если требуется для модели)
+                hf_token = os.getenv("HF_TOKEN")
+                if hf_token:
+                    try:
+                        from huggingface_hub import login
+                        login(token=hf_token)
+                        logger.info("✅ Авторизация в HuggingFace выполнена (HF_TOKEN)")
+                    except Exception as e:
+                        logger.warning(f"⚠️  Не удалось авторизоваться в HuggingFace: {e}")
                 
                 # Загружаем модель в отдельном потоке, чтобы не блокировать event loop
                 def load():
-                    pipeline = StableDiffusionPipeline.from_pretrained(
-                        self.model_id,
-                        torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                        safety_checker=None,  # Отключаем safety checker для ускорения
-                        requires_safety_checker=False,
-                    )
+                    torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+                    use_fp16_variant = "fp16" if self.device == "cuda" else None
+                    local_only = os.getenv("HF_OFFLINE", "0") == "1"
+                    try:
+                        pipeline = PipelineClass.from_pretrained(
+                            self.model_id,
+                            torch_dtype=torch_dtype,
+                            safety_checker=None,  # Отключаем safety checker для ускорения
+                            requires_safety_checker=False,
+                            use_safetensors=True,
+                            variant=use_fp16_variant,
+                            local_files_only=local_only,
+                        )
+                    except OSError as e:
+                        # Фоллбек: если нет .safetensors или fp16-версии, используем .bin без variant
+                        msg = str(e)
+                        if "safetensors" in msg or "diffusion_pytorch_model" in msg or "variant" in msg:
+                            logger.warning(
+                                f"Не удалось загрузить safetensors/fp16 variant, пробуем .bin без variant: {e}"
+                            )
+                            pipeline = PipelineClass.from_pretrained(
+                                self.model_id,
+                                torch_dtype=torch_dtype,
+                                safety_checker=None,
+                                requires_safety_checker=False,
+                                use_safetensors=False,
+                                variant=None,
+                                local_files_only=local_only,
+                            )
+                        else:
+                            raise
                     pipeline = pipeline.to(self.device)
                     
                     # Оптимизация для GPU
@@ -157,6 +204,7 @@ class ImageGenerator:
                             num_inference_steps: int = 30, guidance_scale: float = 7.5,
                             width: int = 512, height: int = 512) -> str:
         """Синхронная генерация изображения через локальную модель"""
+        prompt = self._truncate_prompt(prompt)
         logger.info(f"Генерация изображения через локальный Stable Diffusion: {prompt[:50]}...")
         
         # Генерируем изображение
@@ -179,6 +227,27 @@ class ImageGenerator:
         logger.info(f"Изображение сохранено: {output_path}")
         
         return str(output_path)
+
+    def _truncate_prompt(self, prompt: str) -> str:
+        """
+        Обрезаем промпт до лимита токенов CLIP (обычно 77),
+        чтобы избежать предупреждения и неконтролируемого тримминга.
+        """
+        try:
+            if not self.pipeline or not hasattr(self.pipeline, "tokenizer"):
+                return prompt
+            tokenizer = self.pipeline.tokenizer
+            max_len = getattr(tokenizer, "model_max_length", 77) or 77
+            tokens = tokenizer(prompt, truncation=False)
+            input_ids = tokens.get("input_ids", [])
+            if isinstance(input_ids, list) and len(input_ids) > max_len:
+                truncated_ids = input_ids[:max_len]
+                truncated_prompt = tokenizer.decode(truncated_ids, skip_special_tokens=True)
+                logger.info(f"Промпт обрезан по токенам: {len(input_ids)} -> {max_len}")
+                return truncated_prompt.strip()
+        except Exception as e:
+            logger.debug(f"Не удалось обрезать промпт по токенам: {e}")
+        return prompt
     
     async def generate_image_async(self, prompt: str, output_path: Optional[Path] = None,
                                    num_inference_steps: int = 30, guidance_scale: float = 7.5,
