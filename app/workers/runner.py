@@ -39,6 +39,7 @@ from app.core.embeddings import DocumentIndex
 from app.core.pptx_builder import PresentationBuilder
 from app.core.pdf_builder import slides_to_pdf_bytes
 from app.core.image_generator import image_generator
+from app.core.visual_generator import generate_table_image, generate_chart_image
 from app.utils.helpers import SlideExport
 from app.config import settings
 
@@ -48,6 +49,8 @@ logging.basicConfig(level=logging.INFO)
 POLL_INTERVAL_SEC = 1.0
 STORAGE_DIR = Path("storage")
 STORAGE_DIR.mkdir(exist_ok=True)
+IMAGES_DIR = STORAGE_DIR / "images"
+IMAGES_DIR.mkdir(exist_ok=True)
 
 # Глобальный семафор для ограничения параллельных вызовов генерации модели
 # Инициализируется в worker_loop()
@@ -240,6 +243,9 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
     slide = (await db.execute(select(Slide).where(Slide.id == job.slide_id))).scalar_one()
     project = (await db.execute(select(Project).where(Project.id == slide.project_id))).scalar_one()
 
+    # Логируем тип визуализации для отладки
+    logger.info(f"Генерация слайда {slide.id}: visual_type={slide.visual_type.value}, prompt={slide.prompt[:100]}...")
+
     if not slide.prompt or not slide.prompt.strip():
         raise ValueError("Slide prompt is empty")
 
@@ -254,6 +260,10 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
     # Инициализируем переменные для изображения заранее
     generated_image_path = None
     
+    # Таймаут генерации контента из конфигурации (определяем заранее для использования в метаданных)
+    # Можно переопределить через переменную окружения LLM_GENERATION_TIMEOUT_SEC
+    timeout_sec = settings.LLM_GENERATION_TIMEOUT_SEC
+    
     # Проверяем, является ли это первым слайдом (титульный слайд)
     # или название слайда указывает на титульный слайд
     is_first_slide = slide.position == 1
@@ -262,19 +272,60 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
     is_title_by_name = any(kw in title_lower for kw in title_keywords)
     
     # Если это первый слайд или название указывает на титульный, принудительно устанавливаем layout = "title"
-    if is_first_slide or is_title_by_name:
+    if is_first_slide and is_title_by_name:
         layout_type = "title"
-        generated_text = ""  # Для титульного слайда не генерируем контент
+        # Для титульного слайда генерируем заголовок и подзаголовок из промпта
+        # (не используем название слайда, так как оно может быть просто "Титульный слайд")
+        job.progress = 40
+        await db.commit()
+        
+        try:
+            logger.info(f"Генерация титульного слайда (таймаут: {timeout_sec}с)")
+            if _llm_generation_semaphore:
+                async with _llm_generation_semaphore:
+                    out = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda: content_generator.generate_from_prompt(
+                                user_prompt=slide.prompt,
+                                context=context_text,
+                                audience=str(project.audience_type),
+                                visual_type=slide.visual_type.value,  # Используем .value для получения строки из enum
+                                max_chars=200,  # Ограничение для титульного слайда
+                            )
+                        ),
+                        timeout=timeout_sec
+                    )
+            else:
+                out = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        lambda: content_generator.generate_from_prompt(
+                            user_prompt=slide.prompt,
+                            context=context_text,
+                            audience=str(project.audience_type),
+                            visual_type=slide.visual_type.value,  # Используем .value для получения строки из enum
+                            max_chars=200,
+                        )
+                    ),
+                    timeout=timeout_sec
+                )
+            generated_text = (out.get("content") or "").strip()
+        except asyncio.TimeoutError:
+            error_msg = f"Таймаут генерации титульного слайда ({timeout_sec}с)"
+            logger.warning(f"⏱️ {error_msg}")
+            generated_text = slide.prompt  # Используем промпт как заголовок
+            out = {"title": slide.prompt, "subtitle": "", "layout": "title"}
+            job.error_message = error_msg
+            await db.commit()
+        except Exception as e:
+            logger.error(f"Ошибка генерации титульного слайда: {e}")
+            generated_text = slide.prompt  # Используем промпт как заголовок
+            out = {"title": slide.prompt, "subtitle": "", "layout": "title"}
     else:
         # Генерация может быть очень долгой на CPU/GPU.
         # Чтобы job не "висел" бесконечно в UI, запускаем генерацию в отдельном потоке
         # и ограничиваем её по времени.
         job.progress = 40
         await db.commit()
-
-        # Таймаут генерации контента из конфигурации
-        # Можно переопределить через переменную окружения LLM_GENERATION_TIMEOUT_SEC
-        timeout_sec = settings.LLM_GENERATION_TIMEOUT_SEC
 
         try:
             logger.info(f"Начинаем генерацию слайда (таймаут: {timeout_sec}с)")
@@ -288,7 +339,7 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
                                 user_prompt=slide.prompt,
                                 context=context_text,
                                 audience=str(project.audience_type),
-                                visual_type=str(slide.visual_type),
+                                visual_type=slide.visual_type.value,  # Используем .value для получения строки из enum
                                 max_chars=800,  # Ограничение символов для слайда
                             )
                         ),
@@ -302,7 +353,7 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
                             user_prompt=slide.prompt,
                             context=context_text,
                             audience=str(project.audience_type),
-                            visual_type=str(slide.visual_type),
+                            visual_type=slide.visual_type.value,  # Используем .value для получения строки из enum
                             max_chars=800,  # Ограничение символов для слайда
                         )
                     ),
@@ -310,43 +361,115 @@ async def generate_slide_job(db: AsyncSession, job: Job) -> None:
                 )
             generated_text = (out.get("content") or "").strip()
             layout_type = out.get("layout", "title_and_content")
+            
+            # Логируем сгенерированный контент для отладки
+            logger.info(f"Сгенерированный контент для слайда {slide.id} (visual_type={slide.visual_type.value}): {generated_text[:200]}...")
+            
+            # Генерируем визуализации для таблиц и графиков через matplotlib
+            # (переменная generated_image_path уже инициализирована выше)
+            if slide.visual_type.value == "table" and generated_text:
+                job.progress = 55
+                await db.commit()
+                try:
+                    logger.info(f"Генерация изображения таблицы для слайда {slide.id}")
+                    table_image_path = generate_table_image(generated_text, IMAGES_DIR)
+                    if table_image_path and Path(table_image_path).exists():
+                        generated_image_path = table_image_path
+                        logger.info(f"Изображение таблицы успешно сгенерировано: {generated_image_path}")
+                    else:
+                        logger.warning(f"Изображение таблицы не было создано или файл не найден")
+                except Exception as e:
+                    logger.warning(f"Не удалось сгенерировать изображение таблицы: {e}", exc_info=True)
+            
+            elif slide.visual_type.value == "chart" and generated_text:
+                job.progress = 55
+                await db.commit()
+                try:
+                    logger.info(f"Генерация изображения графика для слайда {slide.id}")
+                    chart_image_path = generate_chart_image(generated_text, IMAGES_DIR)
+                    if chart_image_path and Path(chart_image_path).exists():
+                        generated_image_path = chart_image_path
+                        logger.info(f"Изображение графика успешно сгенерировано: {generated_image_path}")
+                    else:
+                        logger.warning(f"Изображение графика не было создано или файл не найден")
+                except Exception as e:
+                    logger.warning(f"Не удалось сгенерировать изображение графика: {e}", exc_info=True)
+            
         except asyncio.TimeoutError:
+            # При таймауте сохраняем fallback контент вместо полного провала
             error_msg = (
                 f"Таймаут генерации ({timeout_sec}с). "
                 "Генерация слайда превысила допустимое время. "
                 "Попробуйте уменьшить MAX_NEW_TOKENS в настройках или увеличить LLM_GENERATION_TIMEOUT_SEC."
             )
-            logger.error(error_msg)
-            raise TimeoutError(error_msg)
+            logger.warning(f"⏱️ {error_msg}")
+            # Сохраняем fallback контент вместо полного провала
+            generated_text = (
+                f"• Таймаут генерации ({timeout_sec}с). "
+                "Генерация слайда превысила допустимое время.\n"
+                "• Попробуйте:\n"
+                "  - Уменьшить MAX_NEW_TOKENS в настройках\n"
+                "  - Увеличить LLM_GENERATION_TIMEOUT_SEC\n"
+                "  - Использовать более быструю модель или GPU"
+            )
+            layout_type = "title_and_content"
+            # Сохраняем информацию о таймауте в метаданные
+            job.error_message = error_msg
+            await db.commit()
         
         # Генерируем изображение, если тип визуализации - image
-        if str(slide.visual_type) == "image" and generated_text:
+        # Используем описание от Qwen как промпт для Stable Diffusion
+        if slide.visual_type.value == "image":
             job.progress = 60
             await db.commit()
             try:
                 logger.info(f"Генерация изображения для слайда {slide.id}")
+                # Используем сгенерированное описание от Qwen, иначе fallback на промпт пользователя
+                image_prompt = (generated_text or "").strip() or slide.prompt.strip()
+                prompt_source = "llm" if (generated_text or "").strip() else "user"
+                logger.info(
+                    f"Промпт для изображения (source={prompt_source}): {image_prompt[:200]}..."
+                )
+                
                 generated_image_path = await image_generator.generate_image_async(
-                    prompt=generated_text,
+                    prompt=image_prompt,
                 )
                 if generated_image_path:
                     logger.info(f"Изображение успешно сгенерировано: {generated_image_path}")
+                    # Проверяем, что файл существует
+                    if not Path(generated_image_path).exists():
+                        logger.warning(f"Файл изображения не найден: {generated_image_path}")
+                        generated_image_path = None
             except Exception as e:
-                logger.warning(f"Не удалось сгенерировать изображение: {e}")
+                logger.warning(f"Не удалось сгенерировать изображение: {e}", exc_info=True)
                 # Продолжаем без изображения
+                generated_image_path = None
 
     job.progress = 70
     await db.commit()
 
+    # Сохраняем текстовое содержимое (используется для превью/экспорта)
     sc = SlideContent(slide_id=slide.id)
     _sc_set_text(sc, generated_text)
     
     # Сохраняем метаданные о макете, типе визуализации и пути к изображению
     sc.llm_meta = {
         "layout": layout_type,
-        "visual_type": str(slide.visual_type),
+        "visual_type": slide.visual_type.value,  # Используем .value для получения строки из enum
     }
     if generated_image_path:
         sc.llm_meta["generated_image_path"] = generated_image_path
+    
+    # Для титульного слайда сохраняем заголовок и подзаголовок отдельно
+    if layout_type == "title" and isinstance(out, dict):
+        if "title" in out:
+            sc.llm_meta["title"] = out.get("title", "")
+        if "subtitle" in out:
+            sc.llm_meta["subtitle"] = out.get("subtitle", "")
+    # Сохраняем информацию о таймауте, если он произошел
+    if job.error_message and "Таймаут" in job.error_message:
+        sc.llm_meta["timeout_occurred"] = True
+        sc.llm_meta["timeout_seconds"] = timeout_sec
 
     # если у тебя есть version — увеличим
     if hasattr(sc, "version"):
@@ -405,7 +528,7 @@ async def export_project_pptx_job(db, job: Job):
             content=content_text, 
             images=images_list,
             layout=layout_type,
-            visual_type=str(s.visual_type)
+            visual_type=s.visual_type.value
         ))
 
     for se in export_slides:
@@ -470,7 +593,7 @@ async def export_project_pdf_job(db, job: Job):
             content=content_text, 
             images=images_list,
             layout=layout_type,
-            visual_type=str(s.visual_type)
+            visual_type=s.visual_type.value
         ))
 
     pdf_bytes = slides_to_pdf_bytes(export_slides, audience=str(project.audience_type))
