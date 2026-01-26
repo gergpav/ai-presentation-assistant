@@ -6,6 +6,7 @@ from pptx.enum.shapes import PP_PLACEHOLDER, MSO_SHAPE
 from pptx.dml.color import RGBColor
 import io
 import logging
+from pathlib import Path
 from typing import List, Optional
 import re
 
@@ -30,6 +31,42 @@ class PresentationBuilder:
             self.clear_slides()
         else:
             self.prs = Presentation()
+        # Цвет текста по умолчанию (пересчитывается для каждого слайда)
+        self._current_text_color = RGBColor(0, 0, 0)
+
+    def _get_slide_background_rgb(self, slide):
+        """Пытается получить RGB цвет фона слайда/макета."""
+        backgrounds = []
+        try:
+            backgrounds.append(getattr(slide, "background", None))
+        except Exception:
+            backgrounds.append(None)
+        layout = getattr(slide, "slide_layout", None)
+        if layout is not None:
+            backgrounds.append(getattr(layout, "background", None))
+            master = getattr(layout, "slide_master", None)
+            if master is not None:
+                backgrounds.append(getattr(master, "background", None))
+
+        for bg in backgrounds:
+            if not bg:
+                continue
+            try:
+                fill = bg.fill
+                if fill and fill.fore_color and fill.fore_color.rgb:
+                    return fill.fore_color.rgb
+            except Exception:
+                continue
+        return None
+
+    def _get_text_color_for_slide(self, slide) -> RGBColor:
+        """Подбирает цвет текста по яркости фона."""
+        bg_rgb = self._get_slide_background_rgb(slide)
+        if not bg_rgb:
+            return RGBColor(0, 0, 0)
+        r, g, b = int(bg_rgb[0]), int(bg_rgb[1]), int(bg_rgb[2])
+        luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        return RGBColor(255, 255, 255) if luminance < 140 else RGBColor(0, 0, 0)
 
     def clear_slides(self):
         """Очищает все слайды из шаблона, но сохраняет дизайн/layout'ы"""
@@ -85,15 +122,74 @@ class PresentationBuilder:
             logger.warning(f"Не удалось использовать макет {slide_type}, используем первый доступный: {e}")
             slide = self.prs.slides.add_slide(self.prs.slide_layouts[0])
 
+        # Подбираем цвет текста по фону
+        self._current_text_color = self._get_text_color_for_slide(slide)
+
         # Заголовок
         if slide.shapes.title:
             title_shape = slide.shapes.title
-            title_shape.text = title
+            # Растягиваем заголовок почти на всю ширину слайда и корректируем позицию
+            try:
+                # Титульный слайд смещаем чуть правее ("на два пробела")
+                title_shape.left = Inches(0.7) if slide_type == "title" else Inches(0.5)
+                title_shape.width = self.prs.slide_width - Inches(1)
+                title_shape.text_frame.word_wrap = True
+                # Позиционирование: титульный — ближе к центру, остальные — чуть ниже верхней части
+                if slide_type == "title":
+                    title_shape.top = int((self.prs.slide_height - title_shape.height) * 0.35)
+                else:
+                    # Поднимаем заголовок выше примерно на 1–2 см
+                    title_shape.top = Inches(0.4)
+            except Exception:
+                pass
+            # Для титульного слайда парсим заголовок и подзаголовок из контента
+            if slide_type == "title" and content:
+                # Парсим заголовок и подзаголовок из формата "ЗАГОЛОВОК: ... ПОДЗАГОЛОВОК: ..."
+                title_text = title
+                subtitle_text = ""
+                
+                content_lines = [line.strip() for line in content.split('\n') if line.strip()]
+                for line in content_lines:
+                    clean_line = line.lstrip("•-* ").strip()
+                    if clean_line.startswith("ЗАГОЛОВОК:") or clean_line.startswith("Заголовок:"):
+                        title_text = clean_line.split(":", 1)[1].strip() if ":" in clean_line else clean_line
+                    elif clean_line.startswith("ПОДЗАГОЛОВОК:") or clean_line.startswith("Подзаголовок:"):
+                        subtitle_text = clean_line.split(":", 1)[1].strip() if ":" in clean_line else clean_line
+                
+                # Если не нашли структурированный формат, используем первую строку как заголовок
+                if not title_text or title_text == title:
+                    if content_lines:
+                        title_text = content_lines[0].lstrip("•-* ").strip()
+                        if len(content_lines) > 1:
+                            subtitle_text = content_lines[1].lstrip("•-* ").strip()
+                
+                title_shape.text = title_text.lstrip("•-* ").strip()
+                
+                # Добавляем подзаголовок, если есть placeholder для подзаголовка
+                try:
+                    for ph in slide.placeholders:
+                        if ph.placeholder_format.type == PP_PLACEHOLDER.SUBTITLE:
+                            ph.text = subtitle_text.lstrip("•-* ").strip()
+                            for paragraph in ph.text_frame.paragraphs:
+                                paragraph.font.color.rgb = self._current_text_color
+                            break
+                except Exception:
+                    # Если нет placeholder для подзаголовка, игнорируем
+                    pass
+            else:
+                title_shape.text = title
+            
             # Применяем стили к заголовку
             for paragraph in title_shape.text_frame.paragraphs:
                 paragraph.font.size = Pt(44)  # Стандартный размер заголовка
                 paragraph.font.bold = True
                 paragraph.alignment = PP_ALIGN.LEFT
+                paragraph.font.color.rgb = self._current_text_color
+                # Уменьшаем размер шрифта для длинных заголовков
+                if len(title_shape.text) > 50:
+                    paragraph.font.size = Pt(36)
+                if len(title_shape.text) > 80:
+                    paragraph.font.size = Pt(32)
 
         # Обработка контента в зависимости от типа визуализации
         if slide_type == "title" or slide_type == "title_only" or not content.strip():
@@ -103,16 +199,23 @@ class PresentationBuilder:
             # Для двухколоночного слайда разделяем контент на две части
             self._add_two_content(slide, content, visual_type)
         elif visual_type == "table":
-            self._add_table(slide, content)
-        elif visual_type == "chart":
-            self._add_chart(slide, content)
-        elif visual_type == "image":
-            # Для изображений: если есть изображения, добавляем их, иначе добавляем описание
+            # Для таблиц: если есть изображение (сгенерированное через matplotlib), используем его
             if images:
                 self._add_images(slide, images)
-            elif content.strip():
-                # Если изображений нет, добавляем описание как текст
-                self._add_text_content(slide, content)
+            else:
+                # Иначе пытаемся создать таблицу напрямую
+                self._add_table(slide, content)
+        elif visual_type == "chart":
+            # Для графиков: если есть изображение (сгенерированное через matplotlib), используем его
+            if images:
+                self._add_images(slide, images)
+            else:
+                # Иначе пытаемся создать график напрямую
+                self._add_chart(slide, content)
+        elif visual_type == "image":
+            # Для изображений: если есть изображения, добавляем их, иначе ничего не добавляем
+            if images:
+                self._add_images(slide, images)
         else:  # text
             self._add_text_content(slide, content)
 
@@ -155,6 +258,7 @@ class PresentationBuilder:
                 
                 p.text = clean_line
                 p.font.size = Pt(18)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
                 p.space_after = Pt(6)
                 p.level = 0
@@ -175,6 +279,7 @@ class PresentationBuilder:
             tf.text = content
             for p in tf.paragraphs:
                 p.font.size = Pt(18)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
     
     def _add_table(self, slide, content: str):
@@ -189,19 +294,23 @@ class PresentationBuilder:
         for line in lines:
             # Убираем маркеры списка и лишние символы
             clean_line = line.strip()
-            if clean_line.startswith('•') or clean_line.startswith('-'):
+            if clean_line.startswith('•') or clean_line.startswith('-') or clean_line.startswith('*'):
                 clean_line = clean_line[1:].strip()
+            
+            # Убираем markdown форматирование
+            clean_line = clean_line.replace('```', '').replace('`', '').replace('**', '').replace('*', '')
             
             # Проверяем, есть ли разделитель |
             if '|' in clean_line:
                 cells = [col.strip() for col in clean_line.split('|')]
+                # Фильтруем пустые ячейки
+                cells = [cell for cell in cells if cell]
                 if len(cells) >= 2:  # Минимум 2 столбца
                     table_rows.append(cells)
         
         if not table_rows or len(table_rows) < 2:
-            # Если не удалось распарсить таблицу, добавляем как текст
-            logger.warning("Не удалось распарсить таблицу, добавляем как текст")
-            self._add_text_content(slide, content)
+            # Если не удалось распарсить таблицу, не добавляем текстовые описания
+            logger.warning(f"Не удалось распарсить таблицу (найдено строк: {len(table_rows)}), пропускаем добавление")
             return
         
         # Определяем количество столбцов по максимальному количеству в строках
@@ -241,39 +350,50 @@ class PresentationBuilder:
                             paragraph.font.size = Pt(12)
                             paragraph.alignment = PP_ALIGN.LEFT
         except Exception as e:
-            logger.warning(f"Не удалось создать таблицу: {e}, добавляем как текст")
-            self._add_text_content(slide, content)
+            logger.warning(f"Не удалось создать таблицу: {e}, пропускаем добавление")
     
     def _add_chart(self, slide, content: str):
         """Добавляет реальный график на слайд из данных"""
         # Парсим данные графика (формат: Название: Значение)
         chart_data = {}
-        lines = [line.strip() for line in content.split('\n') if line.strip() and ':' in line]
+        lines = [line.strip() for line in content.split('\n') if line.strip()]
         
         for line in lines:
             # Убираем маркеры списка
             clean_line = line.strip()
-            if clean_line.startswith('•') or clean_line.startswith('-'):
+            if clean_line.startswith('•') or clean_line.startswith('-') or clean_line.startswith('*'):
                 clean_line = clean_line[1:].strip()
+            
+            # Убираем markdown форматирование
+            clean_line = clean_line.replace('```', '').replace('`', '').replace('**', '').replace('*', '')
+            
+            # Проверяем наличие двоеточия
+            if ':' not in clean_line:
+                continue
             
             parts = clean_line.split(':', 1)
             if len(parts) == 2:
                 name = parts[0].strip()
                 value_str = parts[1].strip()
+                
                 # Пытаемся извлечь числовое значение
                 try:
+                    # Убираем все нечисловые символы кроме точки, минуса и пробелов
+                    # Сначала убираем валютные символы и другие нечисловые символы
+                    cleaned_value = value_str.replace('$', '').replace('₽', '').replace('€', '').replace(',', '').replace(' ', '')
                     # Убираем все нечисловые символы кроме точки и минуса
-                    numeric_str = ''.join(c for c in value_str if c.isdigit() or c == '.' or c == '-')
+                    numeric_str = ''.join(c for c in cleaned_value if c.isdigit() or c == '.' or c == '-')
                     if numeric_str:
                         value = float(numeric_str)
                         chart_data[name] = value
-                except ValueError:
-                    # Если не число, используем как есть
-                    chart_data[name] = value_str
+                except (ValueError, AttributeError):
+                    # Если не число, пропускаем эту строку
+                    logger.debug(f"Не удалось извлечь число из '{value_str}', пропускаем")
+                    continue
         
         if not chart_data:
-            # Если не удалось распарсить данные, добавляем как текст
-            self._add_text_content(slide, content)
+            # Если не удалось распарсить данные, не добавляем текстовые описания
+            logger.warning(f"Не удалось распарсить данные графика (найдено записей: {len(chart_data)}), пропускаем добавление")
             return
         
         try:
@@ -305,13 +425,7 @@ class PresentationBuilder:
             chart.chart_title.text_frame.text = "График данных"
             
         except Exception as e:
-            logger.warning(f"Не удалось создать график: {e}, добавляем как текст")
-            # Форматируем как список для отображения
-            formatted_lines = []
-            for name, value in chart_data.items():
-                formatted_lines.append(f"• {name}: {value}")
-            formatted_content = "\n".join(formatted_lines)
-            self._add_text_content(slide, formatted_content)
+            logger.warning(f"Не удалось создать график: {e}, пропускаем добавление")
     
     def _add_two_content(self, slide, content: str, visual_type: str = "text"):
         """Добавляет контент в две колонки для слайда типа two_content"""
@@ -366,6 +480,7 @@ class PresentationBuilder:
                     clean_line = clean_line[1:].strip()
                 p.text = clean_line
                 p.font.size = Pt(16)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
             
             # Правая колонка
@@ -382,6 +497,7 @@ class PresentationBuilder:
                     clean_line = clean_line[1:].strip()
                 p.text = clean_line
                 p.font.size = Pt(16)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
         else:
             # Fallback: создаем два текстбокса вручную
@@ -397,6 +513,7 @@ class PresentationBuilder:
             tf_left.text = left_content
             for p in tf_left.paragraphs:
                 p.font.size = Pt(16)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
             
             # Правая колонка
@@ -406,6 +523,7 @@ class PresentationBuilder:
             tf_right.text = right_content
             for p in tf_right.paragraphs:
                 p.font.size = Pt(16)
+                p.font.color.rgb = self._current_text_color
                 p.alignment = PP_ALIGN.LEFT
     
     def _add_images(self, slide, images: List[str]):

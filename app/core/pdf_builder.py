@@ -134,12 +134,48 @@ def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
         bulletIndent=10,
     )
 
+    # Приводим audience в человекочитаемый вид (русские названия)
+    audience_map = {
+        "AudienceType.investors": "инвесторы",
+        "AudienceType.experts": "эксперты",
+        "AudienceType.management": "руководство",
+        "investors": "инвесторы",
+        "experts": "эксперты",
+        "management": "руководство",
+    }
+    audience_display = audience_map.get(str(audience), str(audience))
+
     for idx, slide in enumerate(slides, start=1):
         layout_type = getattr(slide, "layout", "title_and_content")
-        visual_type = getattr(slide, "visual_type", "text")
+        visual_type_raw = getattr(slide, "visual_type", "text")
+        if hasattr(visual_type_raw, "value"):
+            visual_type = visual_type_raw.value
+        else:
+            visual_type = str(visual_type_raw)
+        visual_type = visual_type.lower()
+        if "." in visual_type:
+            visual_type = visual_type.split(".")[-1]
         
         # --- Заголовок ---
         title = slide.title or "Слайд"
+        
+        # Для титульного слайда парсим заголовок и подзаголовок из контента
+        subtitle_text = None
+        if layout_type == "title" and slide.content:
+            content_lines = [line.strip() for line in slide.content.split('\n') if line.strip()]
+            for line in content_lines:
+                clean_line = line.lstrip("•-* ").strip()
+                if clean_line.startswith("ЗАГОЛОВОК:") or clean_line.startswith("Заголовок:"):
+                    title = clean_line.split(":", 1)[1].strip() if ":" in clean_line else clean_line
+                elif clean_line.startswith("ПОДЗАГОЛОВОК:") or clean_line.startswith("Подзаголовок:"):
+                    subtitle_text = clean_line.split(":", 1)[1].strip() if ":" in clean_line else clean_line
+            
+            # Если не нашли структурированный формат, используем первую строку как заголовок
+            if title == slide.title and content_lines:
+                title = content_lines[0].lstrip("•-* ").strip()
+                if len(content_lines) > 1:
+                    subtitle_text = content_lines[1].lstrip("•-* ").strip()
+        
         # Используем Paragraph с TTF-шрифтом для поддержки Unicode/кириллицы
         title_style = ParagraphStyle(
             'TitleStyle',
@@ -149,12 +185,33 @@ def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
             leading=28,
         )
         title_para = Paragraph(title, title_style)
-        title_para.wrapOn(c, width - 4 * cm, height)
-        title_para.drawOn(c, 2 * cm, height - 2 * cm - title_para.height)
+        # Увеличиваем ширину заголовка, чтобы длинные названия не выходили за рамки
+        title_para.wrapOn(c, width - 1 * cm, height)  # Почти на всю ширину
+        # Позиционирование заголовка: титульный — ближе к центру, остальные — чуть ниже верхней части
+        if layout_type == "title":
+            title_y = (height - title_para.height) * 0.55
+        else:
+            # Поднимаем заголовок выше примерно на 2 см
+            title_y = height - 0.8 * cm - title_para.height
+        title_para.drawOn(c, 0.5 * cm, title_y)
 
-        # --- Подзаголовок: аудитория + номер слайда (только если не титульный слайд) ---
-        if layout_type != "title":
-            subtitle = f"Аудитория: {audience} • Слайд {idx} из {len(slides)}"
+        # --- Подзаголовок ---
+        if layout_type == "title" and subtitle_text:
+            # Для титульного слайда используем подзаголовок из контента
+            subtitle_style = ParagraphStyle(
+                'SubtitleStyle',
+                parent=styles['Normal'],
+                fontSize=16,
+                fontName=_register_fonts.regular_font,
+                leading=20,
+            )
+            subtitle_para = Paragraph(subtitle_text.lstrip("•-* ").strip(), subtitle_style)
+            subtitle_para.wrapOn(c, width - 1 * cm, height)
+            subtitle_y = title_y - 1.2 * cm - subtitle_para.height
+            subtitle_para.drawOn(c, 0.5 * cm, subtitle_y)
+        elif layout_type != "title":
+            # Для обычных слайдов показываем аудиторию и номер
+            subtitle = f"Аудитория: {audience_display} • Слайд {idx} из {len(slides)}"
             subtitle_style = ParagraphStyle(
                 'SubtitleStyle',
                 parent=styles['Normal'],
@@ -164,29 +221,58 @@ def slides_to_pdf_bytes(slides: List[SlideExport], audience: str) -> bytes:
             )
             subtitle_para = Paragraph(subtitle, subtitle_style)
             subtitle_para.wrapOn(c, width - 4 * cm, height)
-            subtitle_para.drawOn(c, 2 * cm, height - 3 * cm - subtitle_para.height)
+            subtitle_y = height - 3 * cm - subtitle_para.height
+            subtitle_para.drawOn(c, 2 * cm, subtitle_y)
 
         # Для титульного слайда или слайда только с заголовком - пропускаем контент
+        # (не добавляем буллеты или другой контент)
         if layout_type == "title" or layout_type == "title_only":
             c.showPage()
             continue
 
         # --- Обработка контента в зависимости от типа визуализации ---
-        content_y = height - 4 * cm
-        
-        if visual_type == "table":
-            _draw_table(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
-        elif visual_type == "chart":
-            _draw_chart(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
-        elif visual_type == "image":
-            # Для изображений показываем описание как текст
-            _draw_text_content(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
-        else:  # text
-            _draw_text_content(c, slide.content, 2 * cm, content_y, width - 4 * cm, height - content_y - 2 * cm)
+        # Текст возвращаем к прежнему положению; визуализации опускаем на ~5 см
+        text_x = 2 * cm
+        text_y = height - 5 * cm
+        text_width = width - 4 * cm
+        text_max_height = height - text_y - 1 * cm
 
-        # --- Картинки (если используешь images) ---
+        # Смещаем визуализации правее на 2 см
+        visual_x = 3 * cm
+        visual_width = text_width - 2 * cm
+        # Располагаем визуализации под строкой аудитории и ближе к середине слайда
+        visual_top_limit = subtitle_y - 0.8 * cm
+        visual_bottom_limit = 2 * cm
+        available_height = max(visual_top_limit - visual_bottom_limit, 2 * cm)
+        # Фиксируем максимальную высоту и центрируем по доступной области
+        visual_max_height = min(10 * cm, available_height)
+        visual_y = visual_bottom_limit + (available_height + visual_max_height) / 2
+        # Поднимаем визуализации ещё на 2 см, но не выше верхнего лимита
+        visual_y = min(visual_top_limit, visual_y + 2 * cm)
+
+        # Получаем список изображений
         images = getattr(slide, "images", []) or []
-        if images:
+
+        if visual_type == "table":
+            # Только изображение таблицы, без текстового описания
+            if images:
+                _draw_image(c, images[0], visual_x, visual_y, visual_width, visual_max_height)
+            # Если нет изображения — ничего не рисуем (описание убрано)
+        elif visual_type == "chart":
+            # Только изображение графика, без текстового описания
+            if images:
+                _draw_image(c, images[0], visual_x, visual_y, visual_width, visual_max_height)
+            # Если нет изображения — ничего не рисуем (описание убрано)
+        elif visual_type == "image":
+            # Только изображение, без текстового описания
+            if images:
+                _draw_image(c, images[0], visual_x, visual_y, visual_width, visual_max_height)
+            # Если нет изображения — ничего не рисуем (описание убрано)
+        else:  # text
+            _draw_text_content(c, slide.content, text_x, text_y, text_width, text_max_height)
+
+        # --- Дополнительные картинки (если есть и тип не image/table/chart) ---
+        if images and visual_type not in ["image", "table", "chart"]:
             img_y = 2.5 * cm
             img_x = 2 * cm
             img_max_width = 8 * cm
@@ -295,13 +381,23 @@ def _draw_table(c: canvas.Canvas, content: str, x: float, y: float, width: float
     # Парсим таблицу
     table_data = []
     for line in lines:
-        cells = [cell.strip() for cell in line.split('|')]
-        if len(cells) >= 2:
-            table_data.append(cells)
+        # Убираем маркеры списка и markdown форматирование
+        clean_line = line.strip()
+        if clean_line.startswith('•') or clean_line.startswith('-') or clean_line.startswith('*'):
+            clean_line = clean_line[1:].strip()
+        clean_line = clean_line.replace('```', '').replace('`', '').replace('**', '').replace('*', '')
+        
+        # Проверяем наличие разделителя |
+        if '|' in clean_line:
+            cells = [cell.strip() for cell in clean_line.split('|')]
+            # Фильтруем пустые ячейки
+            cells = [cell for cell in cells if cell]
+            if len(cells) >= 2:  # Минимум 2 столбца
+                table_data.append(cells)
     
     if not table_data or len(table_data) < 2:
-        # Если не таблица, рисуем как текст
-        _draw_text_content(c, content, x, y, width, max_height)
+        # Если не таблица, ничего не добавляем
+        logger.warning(f"Не удалось распарсить таблицу для PDF (найдено строк: {len(table_data)}), пропускаем")
         return
     
     # Определяем размеры ячеек
@@ -379,20 +475,63 @@ def _draw_chart(c: canvas.Canvas, content: str, x: float, y: float, width: float
         return
     
     # Парсим данные графика
-    lines = [line.strip() for line in content.split('\n') if line.strip() and ':' in line]
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    chart_data = {}
     
-    if not lines:
-        _draw_text_content(c, content, x, y, width, max_height)
+    for line in lines:
+        # Убираем маркеры списка и markdown форматирование
+        clean_line = line.strip()
+        if clean_line.startswith('•') or clean_line.startswith('-') or clean_line.startswith('*'):
+            clean_line = clean_line[1:].strip()
+        clean_line = clean_line.replace('```', '').replace('`', '').replace('**', '').replace('*', '')
+        
+        # Проверяем наличие двоеточия
+        if ':' not in clean_line:
+            continue
+        
+        parts = clean_line.split(':', 1)
+        if len(parts) == 2:
+            name = parts[0].strip()
+            value_str = parts[1].strip()
+            
+            # Пытаемся извлечь числовое значение
+            try:
+                cleaned_value = value_str.replace('$', '').replace('₽', '').replace('€', '').replace(',', '').replace(' ', '')
+                numeric_str = ''.join(c for c in cleaned_value if c.isdigit() or c == '.' or c == '-')
+                if numeric_str:
+                    value = float(numeric_str)
+                    chart_data[name] = value
+            except (ValueError, AttributeError):
+                # Если не число, используем как есть
+                chart_data[name] = value_str
+    
+    if not chart_data:
+        logger.warning("Не удалось распарсить данные графика для PDF, пропускаем")
         return
     
     # Форматируем как список
     formatted_lines = []
-    for line in lines:
-        parts = line.split(':', 1)
-        if len(parts) == 2:
-            name = parts[0].strip()
-            value = parts[1].strip()
-            formatted_lines.append(f"{name}: {value}")
+    for name, value in chart_data.items():
+        formatted_lines.append(f"{name}: {value}")
     
     formatted_content = "\n".join(formatted_lines)
     _draw_text_content(c, formatted_content, x, y, width, max_height)
+
+
+def _draw_image(c: canvas.Canvas, image_path: str, x: float, y: float, width: float, max_height: float):
+    """Рисует изображение в той же области, что и текст (y — верхняя граница)"""
+    if not image_path:
+        return
+    try:
+        # y считается верхней границей, поэтому сдвигаем на высоту вниз
+        c.drawImage(
+            image_path,
+            x,
+            y - max_height,
+            width=width,
+            height=max_height,
+            preserveAspectRatio=True,
+            anchor="nw",
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось добавить изображение '{image_path}': {e}")
