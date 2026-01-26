@@ -47,21 +47,29 @@ services:
       # Настройки HuggingFace Hub для надежной загрузки моделей
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_HUB_DISABLE_XET: "1"
       HF_HUB_DOWNLOAD_TIMEOUT: "600"
       REQUESTS_TIMEOUT: "600"
       # Настройки GPU/CUDA
       FORCE_CPU: ${FORCE_CPU:-false}
-      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-runwayml/stable-diffusion-v1-5}
+      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-stabilityai/stable-diffusion-xl-base-1.0}
       STABLE_DIFFUSION_DEVICE: ${STABLE_DIFFUSION_DEVICE:-cuda}
       STABLE_DIFFUSION_STEPS: ${STABLE_DIFFUSION_STEPS:-30}
       STABLE_DIFFUSION_GUIDANCE_SCALE: ${STABLE_DIFFUSION_GUIDANCE_SCALE:-7.5}
-      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-512}
-      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-512}
+      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-640}
+      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-640}
+      # CORS настройки для production (укажите ваши домены через запятую)
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:80,http://localhost:5173,http://127.0.0.1:80}
+      # Токен HuggingFace для доступа к приватным моделям (опционально)
+      HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "${APP_PORT:-8001}:8001"  # Backend API
       - "${FRONTEND_PORT:-80}:80"  # Frontend (nginx)
     volumes:
       - ./storage:/app/storage
+      # Кэш HuggingFace моделей (сохраняется между перезапусками контейнера)
+      # Это критично для production - модели не будут загружаться заново при каждом запуске
+      - huggingface_cache:/root/.cache/huggingface
       # Монтирование кода для разработки отключено в production
       # Раскомментируйте следующую строку для разработки:
       # - ./app:/app/app:ro
@@ -103,18 +111,23 @@ services:
       # Настройки HuggingFace Hub для надежной загрузки моделей
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_HUB_DISABLE_XET: "1"
       HF_HUB_DOWNLOAD_TIMEOUT: "600"
       REQUESTS_TIMEOUT: "600"
       # Настройки GPU/CUDA
       FORCE_CPU: ${FORCE_CPU:-false}
-      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-runwayml/stable-diffusion-v1-5}
+      STABLE_DIFFUSION_MODEL_ID: ${STABLE_DIFFUSION_MODEL_ID:-stabilityai/stable-diffusion-xl-base-1.0}
       STABLE_DIFFUSION_DEVICE: ${STABLE_DIFFUSION_DEVICE:-cuda}
       STABLE_DIFFUSION_STEPS: ${STABLE_DIFFUSION_STEPS:-30}
       STABLE_DIFFUSION_GUIDANCE_SCALE: ${STABLE_DIFFUSION_GUIDANCE_SCALE:-7.5}
-      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-512}
-      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-512}
+      STABLE_DIFFUSION_WIDTH: ${STABLE_DIFFUSION_WIDTH:-640}
+      STABLE_DIFFUSION_HEIGHT: ${STABLE_DIFFUSION_HEIGHT:-640}
+      # Токен HuggingFace для доступа к приватным моделям (опционально)
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ./storage:/app/storage
+      # Кэш HuggingFace моделей (общий с app контейнером)
+      - huggingface_cache:/root/.cache/huggingface
     depends_on:
       - db
       - app
@@ -133,6 +146,10 @@ services:
 
 volumes:
   postgres_data:
+  # Кэш для HuggingFace моделей (LLM и Stable Diffusion)
+  # Сохраняется между перезапусками контейнеров
+  # Размер: ~10-15GB (зависит от используемых моделей)
+  huggingface_cache:
 
 networks:
   ai-presentation-network:
