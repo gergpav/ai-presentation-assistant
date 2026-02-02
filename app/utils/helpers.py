@@ -11,7 +11,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-LLM_SEMAPHORE = asyncio.Semaphore(1)  # чтобы не было параллельных генераций
+LLM_SEMAPHORE = asyncio.Semaphore(1) 
 LLM_TIMEOUT_SEC = settings.LLM_GENERATION_TIMEOUT_SEC  # Таймаут из конфигурации
 
 
@@ -88,7 +88,6 @@ async def generate_one_slide(slide: SlideInput, audience: str) -> SlideExport:
     Генерация текста одного слайда: title+prompt (+контекст из документов) → content
     """
     if not slide.title.strip() or not slide.prompt.strip():
-        # На бэке тоже защищаемся, хотя фронт и так не даст “Добавить слайд”
         raise HTTPException(status_code=400, detail="У каждого слайда должны быть title и prompt")
 
     context = await build_context(slide)

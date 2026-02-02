@@ -70,7 +70,6 @@ class ContentGenerator:
             logger.info(f"Загрузка модели: {settings.LLM_MODEL}")
 
             # Настройка HuggingFace для работы с сетью
-            # Можно использовать токен через переменную окружения HF_TOKEN
             hf_token = os.getenv("HF_TOKEN")
             if hf_token:
                 from huggingface_hub import login
@@ -81,7 +80,7 @@ class ContentGenerator:
                     logger.warning(f"⚠️  Не удалось авторизоваться в HuggingFace: {e}")
 
             # Загружаем токенайзер с обработкой сетевых ошибок
-            max_retries = 5  # Увеличено с 3 до 5
+            max_retries = 5  
             retry_count = 0
             tokenizer_loaded = False
             
@@ -92,14 +91,14 @@ class ContentGenerator:
                         settings.LLM_MODEL,
                         trust_remote_code=True,
                         token=hf_token if hf_token else None,
-                        timeout=600,  # 10 минут таймаут
+                        timeout=600,  
                     )
                     tokenizer_loaded = True
                     logger.info("✅ Токенайзер загружен успешно")
                 except Exception as e:
                     retry_count += 1
                     if retry_count < max_retries:
-                        wait_time = 10 * retry_count  # Увеличена задержка: 10, 20, 30, 40 секунд
+                        wait_time = 10 * retry_count 
                         logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки токенайзера не удалась: {e}")
                         logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                         import time
@@ -109,7 +108,7 @@ class ContentGenerator:
                         raise
 
             # Определяем, использовать ли GPU (по умолчанию используем GPU если доступен)
-            force_cpu = os.getenv("FORCE_CPU", "false").lower() == "true"  # По умолчанию false - используем GPU
+            force_cpu = os.getenv("FORCE_CPU", "false").lower() == "true"  
             use_cuda = False
             
             if not force_cpu and torch.cuda.is_available():
@@ -157,7 +156,7 @@ class ContentGenerator:
                     
                     logger.info("Загрузка модели с 8-bit квантованием (уменьшает память в 2 раза)")
                     # Загрузка модели с retry логикой
-                    max_retries = 5  # Увеличено с 3 до 5
+                    max_retries = 5  
                     retry_count = 0
                     model_loaded = False
                     
@@ -188,7 +187,7 @@ class ContentGenerator:
                         except Exception as e:
                             retry_count += 1
                             if retry_count < max_retries:
-                                wait_time = 15 * retry_count  # Увеличена задержка: 15, 30, 45, 60 секунд
+                                wait_time = 15 * retry_count 
                                 logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки модели не удалась: {e}")
                                 logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                                 import time
@@ -210,12 +209,12 @@ class ContentGenerator:
                     self.model = AutoModelForCausalLM.from_pretrained(
                         settings.LLM_MODEL,
                         trust_remote_code=True,
-                        dtype=torch.float16,  # Используем dtype вместо torch_dtype
+                        dtype=torch.float16,  
                         device_map="auto",
                     )
                 else:
                     # Принудительно загружаем на CPU с retry логикой
-                    max_retries = 5  # Увеличено с 3 до 5
+                    max_retries = 5  
                     retry_count = 0
                     model_loaded = False
                     
@@ -225,8 +224,8 @@ class ContentGenerator:
                             self.model = AutoModelForCausalLM.from_pretrained(
                                 settings.LLM_MODEL,
                                 trust_remote_code=True,
-                                dtype=torch.float32,  # Используем dtype вместо torch_dtype
-                                device_map="cpu",  # Явно указываем CPU
+                                dtype=torch.float32, 
+                                device_map="cpu", 
                                 token=hf_token if hf_token else None,
                             )
                             model_loaded = True
@@ -234,7 +233,7 @@ class ContentGenerator:
                         except Exception as e:
                             retry_count += 1
                             if retry_count < max_retries:
-                                wait_time = 15 * retry_count  # Увеличена задержка: 15, 30, 45, 60 секунд
+                                wait_time = 15 * retry_count  
                                 logger.warning(f"⚠️  Попытка {retry_count}/{max_retries} загрузки модели не удалась: {e}")
                                 logger.info(f"⏳ Повторная попытка через {wait_time} секунд...")
                                 import time
@@ -263,7 +262,7 @@ class ContentGenerator:
 
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки модели {settings.LLM_MODEL}: {e}")
-            self.is_loaded = False  # не падаем, просто помечаем как незагруженную
+            self.is_loaded = False 
 
     # -------- вспомогательная логика под аудитории --------
 

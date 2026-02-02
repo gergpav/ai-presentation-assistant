@@ -523,7 +523,6 @@ def _draw_image(c: canvas.Canvas, image_path: str, x: float, y: float, width: fl
     if not image_path:
         return
     try:
-        # y считается верхней границей, поэтому сдвигаем на высоту вниз
         c.drawImage(
             image_path,
             x,

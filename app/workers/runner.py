@@ -1,28 +1,18 @@
 # app/workers/runner.py
 # КРИТИЧНО: Устанавливаем переменные окружения ДО импорта PyTorch/transformers
 import os
-
-# Принудительно отключаем CUDA (по умолчанию true для избежания ошибок)
-force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
-if force_cpu:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 import asyncio
 import logging
 import uuid
+import pdfplumber
+import pandas as pd
 from sqlalchemy.orm import Session, joinedload
 from pathlib import Path
 from typing import Optional, List
-
-import pdfplumber
 from docx import Document as DocxDocument
 from pptx import Presentation as PptxPresentation
-import pandas as pd
-
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.db.session import AsyncSessionLocal
 from app.db.models.job import Job
 from app.db.models.project import Project
@@ -32,10 +22,8 @@ from app.db.models.slide_document import SlideDocument
 from app.db.models.file import File
 from app.db.models.enums import JobStatus, JobType, SlideStatus, FileKind
 from app.db.models import Template
-
 from app.core.llm_generator import content_generator
 from app.core.embeddings import DocumentIndex
-
 from app.core.pptx_builder import PresentationBuilder
 from app.core.pdf_builder import slides_to_pdf_bytes
 from app.core.image_generator import image_generator
@@ -43,14 +31,24 @@ from app.core.visual_generator import generate_table_image, generate_chart_image
 from app.utils.helpers import SlideExport
 from app.config import settings
 
+
+# Принудительно отключаем CUDA (по умолчанию true для избежания ошибок)
+force_cpu = os.getenv("FORCE_CPU", "true").lower() == "true"
+if force_cpu:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Скрываем GPU от всех библиотек
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
 
 POLL_INTERVAL_SEC = 1.0
 STORAGE_DIR = Path("storage")
 STORAGE_DIR.mkdir(exist_ok=True)
 IMAGES_DIR = STORAGE_DIR / "images"
 IMAGES_DIR.mkdir(exist_ok=True)
+
 
 # Глобальный семафор для ограничения параллельных вызовов генерации модели
 # Инициализируется в worker_loop()
@@ -213,7 +211,6 @@ async def _resolve_project_template_path(db: AsyncSession, project_id: int) -> s
         if tmpl and getattr(tmpl, "storage_path", None):
             return tmpl.storage_path
     except Exception:
-        # relationship может отсутствовать — ок, падаем на fallback
         pass
 
     # 2) fallback: template_id -> Template

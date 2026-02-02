@@ -10,11 +10,12 @@ from typing import Dict, List, Optional
 import uuid
 
 import matplotlib
-matplotlib.use('Agg')  # Используем backend без GUI
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import Rectangle
 import numpy as np
+
+matplotlib.use('Agg')  # Используем backend без GUI
 
 logger = logging.getLogger(__name__)
 

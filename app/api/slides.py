@@ -24,7 +24,7 @@ class SlideCreate(BaseModel):
 
 
 class SlideUpdate(BaseModel):
-    title: str | None = Field(default=None, max_length=255)  # Убрано min_length=1, чтобы разрешить пустую строку
+    title: str | None = Field(default=None, max_length=255)  
     visual_type: SlideVisualType | None = None
     prompt: str | None = None
     position: int | None = None
@@ -307,7 +307,7 @@ async def update_slide(
     if payload.prompt is not None:
         slide.prompt = payload.prompt
     if payload.position is not None:
-        slide.position = payload.position  # ⚠️ временно, ниже сделаем правильный reorder
+        slide.position = payload.position  
 
     await db.commit()
     await db.refresh(slide)
@@ -324,7 +324,7 @@ async def update_slide(
 
 
 class SlideReorderRequest(BaseModel):
-    slide_ids: list[int]  # новый порядок ID слайдов
+    slide_ids: list[int]  
 
 
 @router.post("/projects/{project_id}/slides/reorder")

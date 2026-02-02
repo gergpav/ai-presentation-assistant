@@ -13,8 +13,8 @@ from app.services.auth_service import get_current_user
 from app.db.models.user import User
 from app.db.models.project import Project
 from app.db.models.slide import Slide
-from app.db.models.file import File  # твоя модель "files"
-from app.db.models.slide_document import SlideDocument  # твоя связка "slide_documents"
+from app.db.models.file import File  
+from app.db.models.slide_document import SlideDocument  
 
 router = APIRouter(tags=["documents"])
 
@@ -24,9 +24,9 @@ STORAGE_DIR.mkdir(exist_ok=True)
 
 class SlideDocumentOut(BaseModel):
     id: int
-    name: str  # для фронтенда используем "name" вместо "filename"
-    type: str  # для фронтенда используем "type" вместо "mime_type"
-    size: int  # для фронтенда используем "size" вместо "size_bytes"
+    name: str  
+    type: str 
+    size: int 
 
 
 async def _ensure_slide_owner(db: AsyncSession, slide_id: int, user_id: int) -> Slide:
@@ -142,7 +142,6 @@ async def delete_slide_document(
     if not sd:
         raise HTTPException(status_code=404, detail="Document link not found")
 
-    # удаляем только связь; сам файл можно оставить (или удалить отдельно)
     await db.execute(delete(SlideDocument).where(SlideDocument.id == sd.id))
     await db.commit()
     return None

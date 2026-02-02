@@ -24,10 +24,6 @@ async def extract_text_from_file(file: UploadFile) -> Dict[str, Any]:
     }
 
     try:
-        # ---- TXT УБРАН, .txt больше не поддерживаем ----
-        # if filename.endswith(".txt"):
-        #     result["text"] = content.decode("utf-8", errors="ignore")
-
         # ---- DOCX ----
         if filename.endswith(".docx"):
             doc = Document(io.BytesIO(content))
@@ -58,7 +54,7 @@ async def extract_text_from_file(file: UploadFile) -> Dict[str, Any]:
 
             result["text"] = text.strip()
 
-        # ---- XLSX (исправленная работа с несколькими листами) ----
+        # ---- XLSX ----
         elif filename.endswith(".xlsx"):
             # Обработка Excel файлов
             excel_file = io.BytesIO(content)
@@ -85,7 +81,7 @@ async def extract_text_from_file(file: UploadFile) -> Dict[str, Any]:
             result["text"] = all_text
             result["tables"] = all_tables
 
-        # ---- PPTX (новая обработка презентаций) ----
+        # ---- PPTX ----
         elif filename.endswith(".pptx"):
             prs = Presentation(io.BytesIO(content))
             all_text_parts = []

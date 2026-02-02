@@ -15,7 +15,6 @@ from app.db.session import get_db
 from app.db.models.user import User
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
-print("PWD SCHEMES:", pwd_context.schemes())
 bearer = HTTPBearer(auto_error=False)
 
 

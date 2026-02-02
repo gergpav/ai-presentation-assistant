@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Literal
-
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.project import Project
@@ -15,9 +14,10 @@ from app.db.models.slide_document import SlideDocument
 from app.db.models.enums import AudienceType, SlideStatus, SlideVisualType
 from app.services.auth_service import get_current_user
 
+
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-# Маппинг типов аудитории: фронтенд использует другие названия
+
 AUDIENCE_MAPPING_FROM_FRONTEND = {
     "executive": AudienceType.management,
     "expert": AudienceType.experts,
@@ -30,16 +30,22 @@ AUDIENCE_MAPPING_TO_FRONTEND = {
     AudienceType.investors: "investor",
 }
 
+SLIDE_STATUS_TO_FRONTEND = {
+    SlideStatus.draft: "pending",
+    SlideStatus.generating: "pending",
+    SlideStatus.ready: "completed",
+    SlideStatus.error: "failed",
+}
+
 
 class ProjectCreate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
-    audience: Literal["executive", "expert", "investor"]  # фронтенд использует такие названия
+    audience: Literal["executive", "expert", "investor"]  
     template_id: int | None = None
 
     @field_validator("template_id", mode="before")
     @classmethod
     def normalize_template_id(cls, v):
-        # фронт часто шлёт 0 как "не выбрано"
         if v in (0, "0", "", "null", None):
             return None
         return v
@@ -96,6 +102,68 @@ async def _ensure_project_owner(db: AsyncSession, project_id: int, user_id: int)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+def _extract_generated_content(latest_content: SlideContent | None) -> str | None:
+    if not latest_content or not latest_content.content:
+        return None
+    if isinstance(latest_content.content, dict):
+        return latest_content.content.get("text", str(latest_content.content))
+    return str(latest_content.content)
+
+
+def _build_generated_image_url(slide_id: int, latest_content: SlideContent | None) -> str | None:
+    if not latest_content or not latest_content.llm_meta:
+        return None
+    image_path = latest_content.llm_meta.get("generated_image_path")
+    if image_path and Path(image_path).exists():
+        # Добавляем версию, чтобы фронтенд обновлял изображение при регенерации
+        return f"/api/slides/{slide_id}/image/latest?v={latest_content.version}"
+    return None
+
+
+async def _build_slides_out(db: AsyncSession, project_id: int) -> list[SlideOut]:
+    slides_res = await db.execute(
+        select(Slide).where(Slide.project_id == project_id).order_by(Slide.position.asc())
+    )
+    slides = slides_res.scalars().all()
+    slides_out = []
+    for slide in slides:
+        content_res = await db.execute(
+            select(SlideContent)
+            .where(SlideContent.slide_id == slide.id)
+            .order_by(SlideContent.version.desc())
+            .limit(1)
+        )
+        latest_content = content_res.scalar_one_or_none()
+
+        docs_res = await db.execute(
+            select(SlideDocument).where(SlideDocument.slide_id == slide.id).order_by(SlideDocument.id.asc())
+        )
+        documents = docs_res.scalars().all()
+
+        slides_out.append(
+            SlideOut(
+                id=slide.id,
+                title=slide.title,
+                prompt=slide.prompt,
+                documents=[
+                    SlideDocumentOut(
+                        id=doc.id,
+                        name=doc.filename,
+                        type=doc.mime_type or "application/octet-stream",
+                        size=0,  
+                    )
+                    for doc in documents
+                ],
+                generatedContent=_extract_generated_content(latest_content),
+                generatedImageUrl=_build_generated_image_url(slide.id, latest_content),
+                isGenerating=slide.status == SlideStatus.generating,
+                visualType=slide.visual_type.value,
+                status=SLIDE_STATUS_TO_FRONTEND.get(slide.status, "pending"),
+            )
+        )
+    return slides_out
 
 
 @router.get("", response_model=list[ProjectListItem])
@@ -155,72 +223,7 @@ async def get_project(
 ):
     """Получить полный проект со всеми слайдами и их содержимым"""
     project = await _ensure_project_owner(db, project_id, user.id)
-
-    # Получаем все слайды проекта
-    slides_res = await db.execute(
-        select(Slide).where(Slide.project_id == project_id).order_by(Slide.position.asc())
-    )
-    slides = slides_res.scalars().all()
-
-    slides_out = []
-    for slide in slides:
-        # Получаем последнее содержимое слайда
-        content_res = await db.execute(
-            select(SlideContent)
-            .where(SlideContent.slide_id == slide.id)
-            .order_by(SlideContent.version.desc())
-            .limit(1)
-        )
-        latest_content = content_res.scalar_one_or_none()
-        generated_content = None
-        generated_image_url = None
-        if latest_content and latest_content.content:
-            # content это JSON, извлекаем текст если есть поле text
-            if isinstance(latest_content.content, dict):
-                generated_content = latest_content.content.get("text", str(latest_content.content))
-            else:
-                generated_content = str(latest_content.content)
-        if latest_content and latest_content.llm_meta:
-            image_path = latest_content.llm_meta.get("generated_image_path")
-            if image_path and Path(image_path).exists():
-                # Добавляем версию, чтобы фронтенд обновлял изображение при регенерации
-                generated_image_url = f"/api/slides/{slide.id}/image/latest?v={latest_content.version}"
-
-        # Получаем документы слайда
-        docs_res = await db.execute(
-            select(SlideDocument).where(SlideDocument.slide_id == slide.id).order_by(SlideDocument.id.asc())
-        )
-        documents = docs_res.scalars().all()
-
-        # Маппинг статусов
-        status_mapping = {
-            SlideStatus.draft: "pending",
-            SlideStatus.generating: "pending",
-            SlideStatus.ready: "completed",
-            SlideStatus.error: "failed",
-        }
-
-        slides_out.append(
-            SlideOut(
-                id=slide.id,
-                title=slide.title,
-                prompt=slide.prompt,
-                documents=[
-                    SlideDocumentOut(
-                        id=doc.id,
-                        name=doc.filename,
-                        type=doc.mime_type or "application/octet-stream",
-                        size=0,  # Размер можно добавить позже, если нужно
-                    )
-                    for doc in documents
-                ],
-                generatedContent=generated_content,
-                generatedImageUrl=generated_image_url,
-                isGenerating=slide.status == SlideStatus.generating,
-                visualType=slide.visual_type.value,
-                status=status_mapping.get(slide.status, "pending"),
-            )
-        )
+    slides_out = await _build_slides_out(db, project_id)
 
     return ProjectOut(
         id=project.id,
@@ -251,67 +254,7 @@ async def update_project(
     await db.commit()
     await db.refresh(project)
 
-    # Возвращаем полный проект (нужно переиспользовать логику из get_project)
-    # Упрощенно для начала:
-    slides_res = await db.execute(
-        select(Slide).where(Slide.project_id == project_id).order_by(Slide.position.asc())
-    )
-    slides = slides_res.scalars().all()
-    slides_out = []
-    for slide in slides:
-        content_res = await db.execute(
-            select(SlideContent)
-            .where(SlideContent.slide_id == slide.id)
-            .order_by(SlideContent.version.desc())
-            .limit(1)
-        )
-        latest_content = content_res.scalar_one_or_none()
-        generated_content = None
-        generated_image_url = None
-        if latest_content and latest_content.content:
-            if isinstance(latest_content.content, dict):
-                generated_content = latest_content.content.get("text", str(latest_content.content))
-            else:
-                generated_content = str(latest_content.content)
-        if latest_content and latest_content.llm_meta:
-            image_path = latest_content.llm_meta.get("generated_image_path")
-            if image_path and Path(image_path).exists():
-                # Добавляем версию, чтобы фронтенд обновлял изображение при регенерации
-                generated_image_url = f"/api/slides/{slide.id}/image/latest?v={latest_content.version}"
-
-        docs_res = await db.execute(
-            select(SlideDocument).where(SlideDocument.slide_id == slide.id).order_by(SlideDocument.id.asc())
-        )
-        documents = docs_res.scalars().all()
-
-        status_mapping = {
-            SlideStatus.draft: "pending",
-            SlideStatus.generating: "pending",
-            SlideStatus.ready: "completed",
-            SlideStatus.error: "failed",
-        }
-
-        slides_out.append(
-            SlideOut(
-                id=slide.id,
-                title=slide.title,
-                prompt=slide.prompt,
-                documents=[
-                    SlideDocumentOut(
-                        id=doc.id,
-                        name=doc.filename,
-                        type=doc.mime_type or "application/octet-stream",
-                        size=0,
-                    )
-                    for doc in documents
-                ],
-                generatedContent=generated_content,
-                generatedImageUrl=generated_image_url,
-                isGenerating=slide.status == SlideStatus.generating,
-                visualType=slide.visual_type.value,
-                status=status_mapping.get(slide.status, "pending"),
-            )
-        )
+    slides_out = await _build_slides_out(db, project_id)
 
     return ProjectOut(
         id=project.id,
